@@ -13,10 +13,22 @@ use std::collections::BTreeMap;
 /// starts the service, so if it is absent there is nothing to run whatever the
 /// sources say. Each framework needs its own provider because the goals take
 /// their arguments under different property names -- see `maven_arguments`.
-const SERVICE_PLUGINS: &[(&str, &str)] = &[
-    ("spring-boot-maven-plugin", "spring-boot.maven"),
-    ("quarkus-maven-plugin", "quarkus.maven"),
-    ("micronaut-maven-plugin", "micronaut.maven"),
+///
+/// The group is part of the identity: Maven resolves a declaration without a
+/// `<groupId>` to `org.apache.maven.plugins`, so a bare `spring-boot-maven-plugin`
+/// names another artifact entirely and does not select this provider.
+const SERVICE_PLUGINS: &[(&str, &str, &str)] = &[
+    (
+        "org.springframework.boot",
+        "spring-boot-maven-plugin",
+        "spring-boot.maven",
+    ),
+    ("io.quarkus", "quarkus-maven-plugin", "quarkus.maven"),
+    (
+        "io.micronaut.build",
+        "micronaut-maven-plugin",
+        "micronaut.maven",
+    ),
 ];
 
 /// Maven modules are *declared*, not discovered, so this detector reads the
@@ -55,8 +67,8 @@ pub fn detect(ctx: &DirectoryContext) -> Vec<Detected> {
 fn service_provider(module: &DeclaredModule) -> Option<&'static str> {
     SERVICE_PLUGINS
         .iter()
-        .find(|(plugin, _)| module.applies_plugin(plugin))
-        .map(|(_, provider)| *provider)
+        .find(|(group_id, artifact_id, _)| module.applies_plugin(group_id, artifact_id))
+        .map(|(_, _, provider)| *provider)
 }
 
 /// A Maven framework module belongs to one reactor root and is addressed by its
