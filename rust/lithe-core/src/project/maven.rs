@@ -673,10 +673,13 @@ struct Descriptor {
     group_id: Option<String>,
     artifact_id: Option<String>,
     version: Option<String>,
-    /// `artifactId` of `<parent>`, recorded so a module can be matched back to
-    /// the reactor entry it inherits from. `relativePath` is not needed: the
-    /// reactor tree already places every parent above its children.
+    /// Coordinates of `<parent>`, recorded so a module can be matched back to the
+    /// reactor entry it inherits from. Maven identifies a parent by all three
+    /// coordinates: a shared `artifactId` does not prove the relationship, so a
+    /// module whose parent lives outside this reactor keeps its own plugins.
+    parent_group_id: Option<String>,
     parent_artifact_id: Option<String>,
+    parent_version: Option<String>,
     packaging: String,
     build_directory: Option<String>,
     /// `<reportsDirectory>` values configured for Surefire or Failsafe, raw.
@@ -690,6 +693,30 @@ struct Descriptor {
     test_resource_directories: Vec<String>,
     generated_source_directories: Vec<String>,
     generated_test_source_directories: Vec<String>,
+}
+
+impl Descriptor {
+    /// The coordinates a child must name in `<parent>` to inherit from this POM.
+    ///
+    /// `groupId` and `version` fall back to what `<parent>` declares, which is the
+    /// value Maven gives a module that inherits them.
+    fn coordinates(&self) -> Option<ModuleCoordinates> {
+        Some((
+            self.group_id.clone()?,
+            self.artifact_id.clone()?,
+            self.version.clone()?,
+        ))
+    }
+
+    /// The coordinates this POM names in its own `<parent>`, when it declares all
+    /// three. A partial declaration names no verifiable parent.
+    fn parent_key(&self) -> Option<ModuleCoordinates> {
+        Some((
+            self.parent_group_id.clone()?,
+            self.parent_artifact_id.clone()?,
+            self.parent_version.clone()?,
+        ))
+    }
 }
 
 /// One `<build><plugins>` entry as Maven applies it.
@@ -761,10 +788,10 @@ pub fn declared_modules(root: &Path) -> Result<Vec<DeclaredModule>, CoreError> {
     let Some(root_descriptor) = descriptor(&root.join("pom.xml"))? else {
         return Ok(Vec::new());
     };
-    // Inheritance is resolved from `<parent>` alone, so the reactor is indexed
-    // by `artifactId` first and the walk consults that index instead of
-    // assuming an ancestor sits above the module in the module graph.
-    let reactor = inheritance_index(root, &root_descriptor)?;
+    // Inheritance is resolved from the `<parent>` coordinates a module names, so
+    // the reactor is indexed by directory first and the walk reads that resolved
+    // set instead of assuming an ancestor sits above the module in the module graph.
+    let resolved = inheritance_index(root, &root_descriptor)?;
     let mut modules = Vec::new();
     let mut visited = vec![root.to_path_buf()];
     collect_modules(
@@ -773,51 +800,46 @@ pub fn declared_modules(root: &Path) -> Result<Vec<DeclaredModule>, CoreError> {
         root_descriptor,
         &mut modules,
         &mut visited,
-        &reactor,
+        &resolved,
     );
     Ok(modules)
 }
 
-/// The plugins a module contributes to its children, keyed by its `artifactId`.
+/// Full `groupId:artifactId:version` identity of one POM.
 ///
-/// A plugin with `<inherited>false</inherited>` stays on the module that declares
-/// it, so it is recorded as having nothing to hand down rather than being dropped:
-/// the module itself still applies it.
-/// Bounds a `<parent>` chain so two POMs that name each other cannot loop.
-const MAX_INHERITANCE_DEPTH: usize = 32;
+/// Maven matches a `<parent>` reference against this triple, so a shared
+/// `artifactId` cannot prove which POM a module inherits from: a reactor may
+/// aggregate a module whose real parent lives outside it under that name.
+type ModuleCoordinates = (String, String, String);
 
-type InheritedPlugins = Vec<BuildPlugin>;
-
-/// Indexes every module the reactor declares by the `artifactId` a child names in
-/// `<parent>`.
+/// Indexes every module the reactor declares by the directory it lives in, with
+/// the plugin set it effectively applies.
 ///
-/// Only the reactor is indexed. A `<parent>` resolved outside it -- through a
-/// `<relativePath>` that leaves the workspace, or from the local repository -- is
-/// deliberately absent, so such a module keeps its own plugins instead of being
-/// handed a framework this reactor cannot verify.
+/// Only the reactor is consulted. A `<parent>` this reactor cannot prove -- one
+/// whose full coordinates match no module here, including a parent reached through
+/// `<relativePath>` outside the workspace or from the local repository --
+/// contributes nothing, which is what keeps a module from being handed a
+/// framework the reactor cannot verify.
+///
+/// The reader stays deliberately shallow rather than reproducing Maven's
+/// effective model: it reads coordinates, `<modules>`, and `<build><plugins>`
+/// with their `<inherited>` flags, and resolves only parent links the reactor
+/// itself proves. Property interpolation, profiles, and `relativePath` resolution
+/// stay with Maven, and anything that would need them resolves to no inheritance
+/// instead of a guess.
 fn inheritance_index(
     root: &Path,
     root_descriptor: &Descriptor,
-) -> Result<BTreeMap<String, InheritedPlugins>, CoreError> {
-    // Pass one: collect every POM the reactor declares. Inheritance can only be
-    // resolved once all of them are known, because a child may name a parent
-    // that is not its aggregator and sits later in the module graph.
-    let mut descriptors: BTreeMap<String, Descriptor> = BTreeMap::new();
-    let mut ambiguous: BTreeSet<String> = BTreeSet::new();
+) -> Result<BTreeMap<PathBuf, Vec<BuildPlugin>>, CoreError> {
+    // Pass one: every POM the reactor declares. Inheritance can only be resolved
+    // once all of them are known, because a child may name a parent that is not
+    // its aggregator and sits later in the module graph.
+    let mut modules: Vec<(PathBuf, Descriptor)> = Vec::new();
     let mut pending = vec![(root.to_path_buf(), root_descriptor.clone())];
     let mut visited = vec![root.to_path_buf()];
 
     while let Some((directory, current)) = pending.pop() {
-        if let Some(artifact_id) = current.artifact_id.clone() {
-            // Two modules sharing one `artifactId` leave a child unable to say
-            // which of them it inherits, so neither is indexed.
-            if descriptors.contains_key(&artifact_id) {
-                descriptors.remove(&artifact_id);
-                ambiguous.insert(artifact_id);
-            } else if !ambiguous.contains(&artifact_id) {
-                descriptors.insert(artifact_id, current.clone());
-            }
-        }
+        modules.push((directory.clone(), current.clone()));
         for raw_path in &current.module_paths {
             let Some(relative) = normalize_relative_path(raw_path) else {
                 continue;
@@ -834,58 +856,94 @@ fn inheritance_index(
         }
     }
 
-    // Pass two: resolve each module's effective plugin set by walking its
-    // `<parent>` chain, which is transitive -- a grandchild inherits everything
-    // its parent inherited, not only what the parent declared.
-    let mut index: BTreeMap<String, InheritedPlugins> = BTreeMap::new();
-    for (artifact_id, descriptor) in &descriptors {
-        // Start from what this module declares; ancestors only add to it.
-        let mut effective: Vec<BuildPlugin> = descriptor.plugins.clone();
-        let mut cursor: Option<String> = descriptor.parent_artifact_id.clone();
-        let mut guard = 0;
-
-        while let Some(parent_id) = cursor {
-            // A cycle, or a chain longer than any real reactor, resolves to the
-            // plugins collected so far rather than looping.
-            guard += 1;
-            if guard > MAX_INHERITANCE_DEPTH {
-                break;
-            }
-            let Some(parent) = descriptors.get(&parent_id) else {
-                // Outside the reactor: unverifiable, so nothing is inherited.
-                break;
-            };
-            merge_inherited(&mut effective, &parent.plugins);
-            cursor = parent.parent_artifact_id.clone();
+    // Two modules sharing one coordinate set leave a child unable to say which it
+    // inherits, so neither is offered as a parent.
+    let mut by_coordinates: BTreeMap<ModuleCoordinates, usize> = BTreeMap::new();
+    let mut ambiguous: BTreeSet<ModuleCoordinates> = BTreeSet::new();
+    for (position, (_, module)) in modules.iter().enumerate() {
+        let Some(coordinates) = module.coordinates() else {
+            continue;
+        };
+        if by_coordinates.contains_key(&coordinates) {
+            by_coordinates.remove(&coordinates);
+            ambiguous.insert(coordinates);
+        } else if !ambiguous.contains(&coordinates) {
+            by_coordinates.insert(coordinates, position);
         }
-
-        // Hand down the effective set minus what the module itself opted out of.
-        // A plugin it merely inherited still travels onward, which is what makes
-        // the inheritance transitive; only `<inherited>false</inherited>` on this
-        // module stops a plugin here.
-        let opted_out: Vec<&str> = descriptor
-            .plugins
-            .iter()
-            .filter(|own| !own.inherited)
-            .map(|own| own.artifact_id.as_str())
-            .collect();
-        let inherited = effective
-            .into_iter()
-            .filter(|plugin| !opted_out.iter().any(|id| *id == plugin.artifact_id))
-            .collect::<InheritedPlugins>();
-
-        index.insert(artifact_id.clone(), inherited);
     }
-    Ok(index)
+
+    // Pass two: resolve from the top down, so every module reads the set its own
+    // parent ended up with. Reading the ancestors' raw declarations instead would
+    // let a plugin an intermediate parent stopped reappear below it.
+    let mut resolved: BTreeMap<usize, Vec<BuildPlugin>> = BTreeMap::new();
+    let mut visiting: BTreeSet<usize> = BTreeSet::new();
+    for position in 0..modules.len() {
+        resolve_plugins(
+            position,
+            &modules,
+            &by_coordinates,
+            &mut resolved,
+            &mut visiting,
+        );
+    }
+
+    Ok(modules
+        .into_iter()
+        .enumerate()
+        .map(|(position, (directory, _))| {
+            (
+                directory,
+                resolved.get(&position).cloned().unwrap_or_default(),
+            )
+        })
+        .collect())
 }
-/// Appends the plugins a parent contributes to a module's own.
+
+/// Resolves one module's effective `<build><plugins>`: its own declarations plus
+/// what its parent hands down.
 ///
-/// `merged` wins: a plugin the module declares itself overrides the inherited one,
-/// which is the merge Maven resolves to. Only `<inherited>true</inherited>`
-/// plugins cross the boundary, so a parent that opts a plugin out keeps it to
-/// itself.
-fn merge_inherited(merged: &mut Vec<BuildPlugin>, parent_plugins: &[BuildPlugin]) {
-    for plugin in parent_plugins {
+/// `<inherited>false</inherited>` stops a plugin at the module that declares it.
+/// Because a child reads this resolved set rather than the ancestors' raw
+/// declarations, the stop holds for every descendant instead of letting a further
+/// ancestor supply the plugin again.
+fn resolve_plugins(
+    position: usize,
+    modules: &[(PathBuf, Descriptor)],
+    by_coordinates: &BTreeMap<ModuleCoordinates, usize>,
+    resolved: &mut BTreeMap<usize, Vec<BuildPlugin>>,
+    visiting: &mut BTreeSet<usize>,
+) -> Vec<BuildPlugin> {
+    if let Some(existing) = resolved.get(&position) {
+        return existing.clone();
+    }
+    // Two POMs naming each other cannot produce a model; stopping at the repeat
+    // keeps the walk finite and leaves that module with its own declarations.
+    if !visiting.insert(position) {
+        return modules[position].1.plugins.clone();
+    }
+
+    let descriptor = &modules[position].1;
+    let inherited = descriptor
+        .parent_key()
+        .and_then(|key| by_coordinates.get(&key).copied())
+        .filter(|parent| *parent != position)
+        .map(|parent| resolve_plugins(parent, modules, by_coordinates, resolved, visiting))
+        .unwrap_or_default();
+    visiting.remove(&position);
+
+    let effective = merge_inherited(&descriptor.plugins, &inherited);
+    resolved.insert(position, effective.clone());
+    effective
+}
+
+/// Merges what a module declares with what its parent hands down.
+///
+/// The module's own declaration wins, matching the single `groupId:artifactId`
+/// Maven merges the two under, and only plugins the parent passes on are
+/// considered at all.
+fn merge_inherited(own: &[BuildPlugin], inherited: &[BuildPlugin]) -> Vec<BuildPlugin> {
+    let mut merged = own.to_vec();
+    for plugin in inherited {
         if plugin.inherited
             && !merged
                 .iter()
@@ -894,6 +952,7 @@ fn merge_inherited(merged: &mut Vec<BuildPlugin>, parent_plugins: &[BuildPlugin]
             merged.push(plugin.clone());
         }
     }
+    merged
 }
 /// Flattens the graph depth-first. Unlike `module`, which builds the nested
 /// response, a visited path is never released: a module reachable through two
@@ -905,7 +964,7 @@ fn collect_modules(
     current: Descriptor,
     modules: &mut Vec<DeclaredModule>,
     visited: &mut Vec<PathBuf>,
-    reactor: &BTreeMap<String, InheritedPlugins>,
+    resolved: &BTreeMap<PathBuf, Vec<BuildPlugin>>,
 ) {
     let relative_path = directory
         .strip_prefix(root)
@@ -914,15 +973,13 @@ fn collect_modules(
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| ".".to_string());
     let current_source_roots = source_roots(Some(&current));
-    // Inheritance follows `<parent>`, never `<modules>`. An aggregator may list a
-    // module that does not inherit it at all, and propagating along the module
-    // graph would hand that module a framework it never asked for.
-    let mut effective_plugins = current.plugins.clone();
-    if let Some(parent_id) = current.parent_artifact_id.as_deref() {
-        if let Some(ancestors) = reactor.get(parent_id) {
-            merge_inherited(&mut effective_plugins, ancestors);
-        }
-    }
+    // The index already resolved this directory against the `<parent>` it names,
+    // so these are the effective plugins. A directory it did not resolve has no
+    // provable parent and keeps only what it declares.
+    let effective_plugins = resolved
+        .get(directory)
+        .cloned()
+        .unwrap_or_else(|| current.plugins.clone());
     modules.push(DeclaredModule {
         relative_path,
         artifact_id: current.artifact_id.unwrap_or_else(|| {
@@ -948,7 +1005,7 @@ fn collect_modules(
             continue;
         };
         visited.push(child.clone());
-        collect_modules(root, &child, child_descriptor, modules, visited, reactor);
+        collect_modules(root, &child, child_descriptor, modules, visited, resolved);
     }
 }
 
@@ -1672,11 +1729,12 @@ fn path_has_suffix(path: &str, suffix: &str) -> bool {
             .is_some_and(|prefix| prefix.ends_with('/'))
 }
 
-/// The reactor resolves inheritance through `<parent>`, so the parent's own
-/// `artifactId` has to survive parsing. It arrives under a different path than the
-/// module's own `artifactId` and was previously dropped.
+/// The reactor resolves inheritance through `<parent>`, so the parent's full
+/// coordinates have to survive parsing -- they are what proves which reactor POM
+/// a module inherits from. The parent's values also become the module's own
+/// `groupId`/`version` when it declares neither, so this asserts both readings.
 #[test]
-fn descriptor_keeps_the_parent_artifact_id() {
+fn descriptor_keeps_the_parent_coordinates() {
     let dir = std::env::temp_dir().join(format!("lithe-descriptor-parent-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let pom = dir.join("pom.xml");
@@ -1688,7 +1746,24 @@ fn descriptor_keeps_the_parent_artifact_id() {
 
     let parsed = descriptor(&pom).unwrap().expect("descriptor");
     assert_eq!(parsed.artifact_id.as_deref(), Some("the-child"));
-    assert_eq!(parsed.parent_artifact_id.as_deref(), Some("the-parent"));
+    assert_eq!(
+        parsed.parent_key(),
+        Some((
+            "com.example".to_string(),
+            "the-parent".to_string(),
+            "1".to_string()
+        ))
+    );
+    // The module declares neither value itself, so its effective coordinates are
+    // the parent's pair plus its own `artifactId`.
+    assert_eq!(
+        parsed.coordinates(),
+        Some((
+            "com.example".to_string(),
+            "the-child".to_string(),
+            "1".to_string()
+        ))
+    );
 
     std::fs::remove_dir_all(&dir).unwrap();
 }
@@ -2081,21 +2156,27 @@ fn descriptor(path: &Path) -> Result<Option<Descriptor>, CoreError> {
                     .collect::<Vec<_>>()
                     .join("/");
                 match path.as_str() {
-                    "project/groupId" | "project/parent/groupId" => {
-                        if value.group_id.is_none() || path == "project/groupId" {
-                            value.group_id = non_empty(text.clone());
+                    "project/groupId" => value.group_id = non_empty(text.clone()),
+                    "project/artifactId" => value.artifact_id = non_empty(text.clone()),
+                    "project/version" => value.version = non_empty(text.clone()),
+                    // `<parent>` coordinates are recorded separately from the
+                    // module's own. Maven identifies a parent by all three, so a
+                    // shared `artifactId` alone cannot prove the relationship, and
+                    // they also become the module's own `groupId`/`version` when it
+                    // declares neither -- the effective coordinates Maven resolves.
+                    "project/parent/groupId" => {
+                        value.parent_group_id = non_empty(text.clone());
+                        if value.group_id.is_none() {
+                            value.group_id = value.parent_group_id.clone();
                         }
                     }
-                    "project/artifactId" => value.artifact_id = non_empty(text.clone()),
-                    // `<parent><artifactId>` is what identifies the reactor entry a
-                    // module inherits from; without it a parent declared only in
-                    // `<build><plugins>` cannot be reached from the child.
                     "project/parent/artifactId" => {
                         value.parent_artifact_id = non_empty(text.clone())
                     }
-                    "project/version" | "project/parent/version" => {
-                        if value.version.is_none() || path == "project/version" {
-                            value.version = non_empty(text.clone());
+                    "project/parent/version" => {
+                        value.parent_version = non_empty(text.clone());
+                        if value.version.is_none() {
+                            value.version = value.parent_version.clone();
                         }
                     }
                     "project/packaging" => {
