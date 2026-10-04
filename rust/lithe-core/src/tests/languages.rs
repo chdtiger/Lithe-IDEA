@@ -294,7 +294,7 @@ fn maven_scan_expands_custom_build_directory_and_execution_scoped_sources() {
     .expect("custom build pom should be writable");
     fs::write(
         root.join("execution-scoped/pom.xml"),
-        r#"<project><artifactId>execution-scoped</artifactId><build><plugins><plugin><executions><execution><id>add-generated</id><configuration><sources><source>target/generated-sources/openapi</source></sources><testSources><testSource>target/generated-test-sources/fixtures</testSource></testSources></configuration></execution></executions><artifactId>build-helper-maven-plugin</artifactId></plugin></plugins></build></project>"#,
+        r#"<project><artifactId>execution-scoped</artifactId><build><plugins><plugin><groupId>org.codehaus.mojo</groupId><executions><execution><id>add-generated</id><configuration><sources><source>target/generated-sources/openapi</source></sources><testSources><testSource>target/generated-test-sources/fixtures</testSource></testSources></configuration></execution></executions><artifactId>build-helper-maven-plugin</artifactId></plugin></plugins></build></project>"#,
     )
     .expect("execution-scoped pom should be writable");
 

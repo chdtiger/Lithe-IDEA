@@ -154,7 +154,7 @@ fn run_configuration_commands_generate_merge_and_plan() {
     fs::create_dir_all(root.join("src/main/java/com/example"))
         .expect("source directory should be creatable");
     fs::write(root.join("src/main/java/com/example/App.java"), "package com.example; @SpringBootApplication class App { public static void main(String[] args) {} }").expect("source should be writable");
-    fs::write(root.join("pom.xml"), "<project><artifactId>demo</artifactId><properties><maven.compiler.release>21</maven.compiler.release></properties><build><plugins><plugin><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></project>").expect("pom should be writable");
+    fs::write(root.join("pom.xml"), "<project><artifactId>demo</artifactId><properties><maven.compiler.release>21</maven.compiler.release></properties><build><plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></project>").expect("pom should be writable");
 
     let request = serde_json::json!({"id":"generate","command":"runConfig.generate","payload":{"root":root,"paths":["src/main/java/com/example/App.java"],"modulePaths":[]}});
     let generated: Value = serde_json::from_str(&execute_json(&request.to_string()))
@@ -300,7 +300,7 @@ fn run_configuration_generation_uses_a_maven_project_below_the_workspace() {
     .unwrap();
     fs::write(
         root.join("projects/demo/service/pom.xml"),
-        r#"<project><artifactId>service</artifactId><build><plugins><plugin><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></project>"#,
+        r#"<project><artifactId>service</artifactId><build><plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></project>"#,
     )
     .unwrap();
     fs::write(root.join("projects/demo/mvnw"), "#!/bin/sh\n").unwrap();
@@ -2574,7 +2574,7 @@ fn hybrid_project_scopes_node_diagnostics_to_npm_configurations() {
     .unwrap();
     fs::write(
         root.join("pom.xml"),
-        "<project><artifactId>demo</artifactId><properties><java.version>21</java.version></properties><build><plugins><plugin><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></project>",
+        "<project><artifactId>demo</artifactId><properties><java.version>21</java.version></properties><build><plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></project>",
     )
     .unwrap();
     fs::write(
@@ -3657,7 +3657,7 @@ fn working_directory_override_keeps_reactor_module_configurations() {
     .unwrap();
     fs::write(
         root.join("shop-web/pom.xml"),
-        r#"<project><artifactId>shop-web</artifactId><build><plugins><plugin><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></project>"#,
+        r#"<project><artifactId>shop-web</artifactId><build><plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></project>"#,
     )
     .unwrap();
     fs::write(
