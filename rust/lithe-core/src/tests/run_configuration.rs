@@ -2170,6 +2170,139 @@ fn run_configuration_inspection_invalidates_an_older_generator_revision() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// A workspace generated under revision 9 still carries the old classification.
+/// Upgrading must regenerate it without changing a surviving service id or losing
+/// its override, and must report the override of a service the coordinate fix
+/// removed as an orphan instead of dropping it silently.
+#[test]
+fn run_configuration_regeneration_keeps_surviving_ids_and_orphans_removed_overrides() {
+    let root = temporary_root("run-config-regenerate-orphans");
+    fs::create_dir_all(root.join("service-a")).unwrap();
+    fs::create_dir_all(root.join("fake-b")).unwrap();
+    fs::create_dir_all(root.join(".lithe/run")).unwrap();
+    fs::write(
+        root.join("pom.xml"),
+        "<project><artifactId>platform</artifactId><packaging>pom</packaging><modules><module>service-a</module><module>fake-b</module></modules></project>",
+    )
+    .unwrap();
+    // The platform coordinate is the modern official one and keeps working.
+    fs::write(
+        root.join("service-a/pom.xml"),
+        "<project><artifactId>service-a</artifactId><build><plugins><plugin><groupId>io.quarkus.platform</groupId><artifactId>quarkus-maven-plugin</artifactId></plugin></plugins></build></project>",
+    )
+    .unwrap();
+    // A same-named plugin under a custom group: revision 9 called this a Spring
+    // Boot service, the coordinate fix does not.
+    fs::write(
+        root.join("fake-b/pom.xml"),
+        "<project><artifactId>fake-b</artifactId><build><plugins><plugin><groupId>com.example</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></project>",
+    )
+    .unwrap();
+
+    let call = |id: &str, command: &str, payload: Value| -> Value {
+        let response: Value = serde_json::from_str(&execute_json(
+            &serde_json::json!({ "id": id, "command": command, "payload": payload }).to_string(),
+        ))
+        .unwrap();
+        assert_eq!(response["ok"], true, "{response}");
+        response["data"].clone()
+    };
+
+    let generated = call(
+        "generate-before-upgrade",
+        "runConfig.generate",
+        serde_json::json!({"root": root}),
+    );
+    let mut document = generated["generated"].clone();
+    let configurations = document["configurations"].as_array().unwrap();
+    assert!(configurations
+        .iter()
+        .any(|value| value["id"] == "quarkus.maven:service-a"));
+    assert!(!configurations
+        .iter()
+        .any(|value| value["id"] == "spring-boot.maven:fake-b"));
+    // Make the document look like one revision 9 produced, with the user
+    // overrides in place -- including one for the service the fix removes.
+    document["generator"]["fingerprint"] = serde_json::json!(generator_fingerprint_for_revision(
+        &document["generator"]["inputs"],
+        "9",
+    ));
+    fs::write(
+        root.join(".lithe/run/generated.json"),
+        serde_json::to_string(&document).unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        root.join(".lithe/run/local.json"),
+        r#"{"version":2,"configurations":[{"id":"quarkus.maven:service-a","extensions":{"maven":{"jvmArguments":["-Xmx2g"]}}},{"id":"spring-boot.maven:fake-b","extensions":{"maven":{"jvmArguments":["-Xmx1g"]}}}]}"#,
+    )
+    .unwrap();
+
+    let inspected = call(
+        "inspect-after-upgrade",
+        "runConfig.inspect",
+        serde_json::json!({"root": root}),
+    );
+    assert!(
+        inspected["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value["code"] == "staleFingerprint"),
+        "{inspected}"
+    );
+
+    // Regeneration keeps the surviving id and no longer lists the fake service.
+    let regenerated = call(
+        "generate-after-upgrade",
+        "runConfig.generate",
+        serde_json::json!({"root": root}),
+    );
+    let document = regenerated["generated"].clone();
+    assert!(document["configurations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value["id"] == "quarkus.maven:service-a"));
+    assert!(!document["configurations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|value| value["id"] == "spring-boot.maven:fake-b"));
+    fs::write(
+        root.join(".lithe/run/generated.json"),
+        serde_json::to_string(&document).unwrap(),
+    )
+    .unwrap();
+
+    let resolved = call(
+        "resolve-after-upgrade",
+        "runConfig.resolve",
+        serde_json::json!({"root": root}),
+    );
+    let service = resolved["configurations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|value| value["id"] == "quarkus.maven:service-a")
+        .unwrap_or_else(|| panic!("surviving service missing: {resolved}"));
+    assert_eq!(
+        service["extensions"]["maven"]["jvmArguments"],
+        serde_json::json!(["-Xmx2g"])
+    );
+    assert!(
+        resolved["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value["code"] == "orphanedOverride"
+                && value["id"] == "spring-boot.maven:fake-b"),
+        "{resolved}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn generator_fingerprint_for_revision(inputs: &Value, revision: &str) -> String {
     let inputs = serde_json::from_value::<BTreeMap<String, String>>(inputs.clone()).unwrap();
     let mut digest = Sha256::new();

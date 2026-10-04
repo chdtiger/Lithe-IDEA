@@ -2227,3 +2227,134 @@ fn maven_detector_child_declaration_does_not_hide_a_same_named_inherited_plugin(
 
     fs::remove_dir_all(root).unwrap();
 }
+
+/// Quarkus republishes its Maven plugin under the platform group and Micronaut 4
+/// moved to `io.micronaut.maven`; both coordinates of each framework are
+/// official, so both select the provider -- while a same-named plugin under any
+/// other group still selects nothing.
+#[test]
+fn maven_detector_accepts_every_official_coordinate_of_a_framework() {
+    let root = temporary_root("detect-maven-official-coordinates");
+    for module in [
+        "quarkus-core",
+        "quarkus-platform",
+        "micronaut-build",
+        "micronaut-maven",
+        "not-official",
+    ] {
+        fs::create_dir_all(root.join(module)).unwrap();
+    }
+    fs::write(
+        root.join("pom.xml"),
+        "<project><artifactId>platform</artifactId><packaging>pom</packaging><modules><module>quarkus-core</module><module>quarkus-platform</module><module>micronaut-build</module><module>micronaut-maven</module><module>not-official</module></modules></project>",
+    )
+    .unwrap();
+    for (module, group, plugin) in [
+        ("quarkus-core", "io.quarkus", "quarkus-maven-plugin"),
+        (
+            "quarkus-platform",
+            "io.quarkus.platform",
+            "quarkus-maven-plugin",
+        ),
+        (
+            "micronaut-build",
+            "io.micronaut.build",
+            "micronaut-maven-plugin",
+        ),
+        (
+            "micronaut-maven",
+            "io.micronaut.maven",
+            "micronaut-maven-plugin",
+        ),
+        ("not-official", "com.example", "quarkus-maven-plugin"),
+    ] {
+        fs::write(
+            root.join(module).join("pom.xml"),
+            format!("<project><artifactId>{module}</artifactId><build><plugins><plugin><groupId>{group}</groupId><artifactId>{plugin}</artifactId></plugin></plugins></build></project>"),
+        )
+        .unwrap();
+    }
+
+    let ids = generated_configurations(&root)
+        .into_iter()
+        .filter_map(|item| item["id"].as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+
+    assert!(
+        ids.contains(&"quarkus.maven:quarkus-core".to_string()),
+        "{ids:?}"
+    );
+    assert!(
+        ids.contains(&"quarkus.maven:quarkus-platform".to_string()),
+        "{ids:?}"
+    );
+    assert!(
+        ids.contains(&"micronaut.maven:micronaut-build".to_string()),
+        "{ids:?}"
+    );
+    assert!(
+        ids.contains(&"micronaut.maven:micronaut-maven".to_string()),
+        "{ids:?}"
+    );
+    assert!(!ids.iter().any(|id| id.contains("not-official")), "{ids:?}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The platform coordinates are what a generated project typically relies on:
+/// the plugin sits in the parent and the children only name `<parent>`, so the
+/// inherited pair must resolve for either official group.
+#[test]
+fn maven_detector_inherits_every_official_coordinate_from_a_parent() {
+    let root = temporary_root("detect-maven-official-inheritance");
+    for module in ["quarkus-parent", "micronaut-parent"] {
+        fs::create_dir_all(root.join(module)).unwrap();
+    }
+    for module in [
+        "quarkus-parent/quarkus-service",
+        "micronaut-parent/micronaut-service",
+    ] {
+        fs::create_dir_all(root.join(module)).unwrap();
+    }
+    fs::write(
+        root.join("pom.xml"),
+        "<project><groupId>com.acme</groupId><artifactId>platform</artifactId><version>1</version><packaging>pom</packaging><modules><module>quarkus-parent</module><module>micronaut-parent</module></modules></project>",
+    )
+    .unwrap();
+    fs::write(
+        root.join("quarkus-parent/pom.xml"),
+        "<project><parent><groupId>com.acme</groupId><artifactId>platform</artifactId><version>1</version></parent><artifactId>quarkus-parent</artifactId><packaging>pom</packaging><modules><module>quarkus-service</module></modules><build><plugins><plugin><groupId>io.quarkus.platform</groupId><artifactId>quarkus-maven-plugin</artifactId></plugin></plugins></build></project>",
+    )
+    .unwrap();
+    fs::write(
+        root.join("micronaut-parent/pom.xml"),
+        "<project><parent><groupId>com.acme</groupId><artifactId>platform</artifactId><version>1</version></parent><artifactId>micronaut-parent</artifactId><packaging>pom</packaging><modules><module>micronaut-service</module></modules><build><plugins><plugin><groupId>io.micronaut.maven</groupId><artifactId>micronaut-maven-plugin</artifactId></plugin></plugins></build></project>",
+    )
+    .unwrap();
+    fs::write(
+        root.join("quarkus-parent/quarkus-service/pom.xml"),
+        "<project><parent><groupId>com.acme</groupId><artifactId>quarkus-parent</artifactId><version>1</version></parent><artifactId>quarkus-service</artifactId></project>",
+    )
+    .unwrap();
+    fs::write(
+        root.join("micronaut-parent/micronaut-service/pom.xml"),
+        "<project><parent><groupId>com.acme</groupId><artifactId>micronaut-parent</artifactId><version>1</version></parent><artifactId>micronaut-service</artifactId></project>",
+    )
+    .unwrap();
+
+    let ids = generated_configurations(&root)
+        .into_iter()
+        .filter_map(|item| item["id"].as_str().map(str::to_string))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        ids,
+        vec![
+            "micronaut.maven:micronaut-service".to_string(),
+            "quarkus.maven:quarkus-service".to_string()
+        ],
+        "{ids:?}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}

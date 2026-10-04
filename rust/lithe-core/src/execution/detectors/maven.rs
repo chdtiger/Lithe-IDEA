@@ -17,6 +17,12 @@ use std::collections::BTreeMap;
 /// The group is part of the identity: Maven resolves a declaration without a
 /// `<groupId>` to `org.apache.maven.plugins`, so a bare `spring-boot-maven-plugin`
 /// names another artifact entirely and does not select this provider.
+///
+/// A framework may publish its plugin under more than one official group.
+/// Quarkus republishes the plugin under the platform's own `io.quarkus.platform`
+/// group, and Micronaut 4.0 moved to `io.micronaut.maven` while
+/// `io.micronaut.build` stays for the 3.x line. Each of those coordinates is
+/// listed, and a same-named plugin under any other group still selects nothing.
 const SERVICE_PLUGINS: &[(&str, &str, &str)] = &[
     (
         "org.springframework.boot",
@@ -25,7 +31,17 @@ const SERVICE_PLUGINS: &[(&str, &str, &str)] = &[
     ),
     ("io.quarkus", "quarkus-maven-plugin", "quarkus.maven"),
     (
+        "io.quarkus.platform",
+        "quarkus-maven-plugin",
+        "quarkus.maven",
+    ),
+    (
         "io.micronaut.build",
+        "micronaut-maven-plugin",
+        "micronaut.maven",
+    ),
+    (
+        "io.micronaut.maven",
         "micronaut-maven-plugin",
         "micronaut.maven",
     ),

@@ -1669,3 +1669,73 @@ fn generated_maven_settings_discard_child_elements_of_the_replaced_repository() 
         "<settings><localRepository>/new</localRepository></settings>"
     );
 }
+
+/// The generated-source extraction identifies a plugin by `groupId:artifactId`
+/// as well: an explicit `org.apache.maven.plugins` compiler contributes its
+/// directories, while a same-named plugin under another group and one whose
+/// group is still an expression contribute nothing.
+#[test]
+fn maven_scan_requires_the_official_coordinate_for_source_root_plugins() {
+    let root = temporary_root("maven-scan-plugin-coordinates");
+    for module in ["official", "custom", "expression"] {
+        fs::create_dir_all(root.join(module)).unwrap();
+    }
+    fs::write(
+        root.join("pom.xml"),
+        "<project><artifactId>demo</artifactId><packaging>pom</packaging><modules><module>official</module><module>custom</module><module>expression</module></modules></project>",
+    )
+    .unwrap();
+    for (module, group, directory) in [
+        (
+            "official",
+            "org.apache.maven.plugins",
+            "target/generated-sources/official",
+        ),
+        ("custom", "com.example", "target/generated-sources/custom"),
+        (
+            "expression",
+            "${plugin.group}",
+            "target/generated-sources/expression",
+        ),
+    ] {
+        fs::write(
+            root.join(module).join("pom.xml"),
+            format!("<project><artifactId>{module}</artifactId><build><plugins><plugin><groupId>{group}</groupId><artifactId>maven-compiler-plugin</artifactId><configuration><generatedSourcesDirectory>{directory}</generatedSourcesDirectory></configuration></plugin></plugins></build></project>"),
+        )
+        .unwrap();
+    }
+
+    let request = serde_json::json!({
+        "id": "maven-scan-plugin-coordinates",
+        "command": "maven.scan",
+        "payload": {"root": root, "paths": ["official/pom.xml"]}
+    });
+    let response: Value = serde_json::from_str(&execute_json(&request.to_string()))
+        .expect("Maven response should be JSON");
+    assert_eq!(response["ok"], true, "{response}");
+
+    let modules = response["data"]["modules"].as_array().unwrap();
+    assert_eq!(modules.len(), 3, "{response}");
+    let paths = |index: usize| -> Vec<String> {
+        modules[index]["sourceRoots"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|value| value["path"].as_str().map(str::to_string))
+            .collect()
+    };
+    assert!(
+        paths(0).contains(&"target/generated-sources/official".to_string()),
+        "{response}"
+    );
+    for index in [1_usize, 2] {
+        assert!(
+            !paths(index)
+                .iter()
+                .any(|path| path.starts_with("target/generated-sources/")),
+            "module {index} must not contribute generated roots: {response}"
+        );
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}

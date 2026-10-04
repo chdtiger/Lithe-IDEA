@@ -153,10 +153,12 @@
       "command": "runConfig.generate",
       "payload": { "root": "/workspace" },
       "workspace": {
-        "pom.xml": "<project><artifactId>platform</artifactId><packaging>pom</packaging><modules><module>boot-api</module><module>quarkus-api</module><module>micronaut-api</module></modules></project>",
+        "pom.xml": "<project><artifactId>platform</artifactId><packaging>pom</packaging><modules><module>boot-api</module><module>quarkus-api</module><module>micronaut-api</module><module>quarkus-platform-api</module><module>micronaut-maven-api</module></modules></project>",
         "boot-api/pom.xml": "<project><artifactId>boot-api</artifactId><build><plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></project>",
         "quarkus-api/pom.xml": "<project><artifactId>quarkus-api</artifactId><build><plugins><plugin><groupId>io.quarkus</groupId><artifactId>quarkus-maven-plugin</artifactId></plugin></plugins></build></project>",
-        "micronaut-api/pom.xml": "<project><artifactId>micronaut-api</artifactId><build><plugins><plugin><groupId>io.micronaut.build</groupId><artifactId>micronaut-maven-plugin</artifactId></plugin></plugins></build></project>"
+        "micronaut-api/pom.xml": "<project><artifactId>micronaut-api</artifactId><build><plugins><plugin><groupId>io.micronaut.build</groupId><artifactId>micronaut-maven-plugin</artifactId></plugin></plugins></build></project>",
+        "quarkus-platform-api/pom.xml": "<project><artifactId>quarkus-platform-api</artifactId><build><plugins><plugin><groupId>io.quarkus.platform</groupId><artifactId>quarkus-maven-plugin</artifactId></plugin></plugins></build></project>",
+        "micronaut-maven-api/pom.xml": "<project><artifactId>micronaut-maven-api</artifactId><build><plugins><plugin><groupId>io.micronaut.maven</groupId><artifactId>micronaut-maven-plugin</artifactId></plugin></plugins></build></project>"
       },
       "expected": {
         "configurations": [
@@ -177,6 +179,18 @@
             "provider": "micronaut.maven",
             "execution": "service",
             "extensions": { "maven": { "module": "micronaut-api" } }
+          },
+          {
+            "id": "quarkus.maven:quarkus-platform-api",
+            "provider": "quarkus.maven",
+            "execution": "service",
+            "extensions": { "maven": { "module": "quarkus-platform-api" } }
+          },
+          {
+            "id": "micronaut.maven:micronaut-maven-api",
+            "provider": "micronaut.maven",
+            "execution": "service",
+            "extensions": { "maven": { "module": "micronaut-maven-api" } }
           }
         ],
         "reason": "The plugin decides the framework, and the framework decides the provider, because each goal takes its arguments under different property names."
