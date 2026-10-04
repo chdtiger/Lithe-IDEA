@@ -20,12 +20,36 @@ verification scripts are the executable source of boundary checks.
 
 ## Feature Contracts
 
+Shared Monaco highlighting is owned by the current view/model pair. A queued
+callback for a closed or replaced model must finish without running against the
+new model or locking surviving documents. Primary, split and diff views share
+this lifecycle protection; actual symbol computation remains upstream-owned.
+
 Agent prompt completion may include Agent-reported token counters; their accounting
 scope belongs to the provider and is separate from context occupancy and subscription
 quota. Platforms may measure locally observed turns with a monotonic clock, including
 tools and permission waits, and freeze elapsed time at completion, failure or disconnect.
 Missing usage and unmeasured replayed history remain unknown. See the
 [Agent host contract](rust-core-api.md) and `fixtures/agent/acp-events-v1.json`.
+
+Agent activity presentation uses the selected session's reported plan, pending
+tools and file diffs. Review acknowledgements are local to the exact reported
+version; later edits remain reviewable and start after the acknowledged prefix.
+The same open session retains its acknowledgements through disconnects and history
+reloads; closing its tab releases them. Replay must still match the exact version
+or prefix, so changed upstream evidence is never hidden by a stale acknowledgement.
+Reported excerpts and missing original content are not full-file snapshots.
+Native rollback is an explicit user action: preserve dirty editor buffers,
+reject paths outside the workspace and ambiguous or incomplete evidence, retain
+unrelated text, and use guarded native writes preserving encoding. Creation
+requires explicit evidence before recoverable removal. Reject replacement terminal
+symlinks instead of following them. Guard removal with the expected byte identity
+and the native save lock; verify the actual moved object, restore it on conflict
+without overwriting a recreated path, and report any manual recovery location.
+Unsupported adapters must reject removal rather than use unchecked Trash.
+Restoring a deletion
+requires the path to remain absent. Batch failures retain unprocessed changes.
+These presentation actions do not add Agent Host commands or persist chat history.
 
 | Feature | Shared input/output | Platform-owned implementation |
 | --- | --- | --- |

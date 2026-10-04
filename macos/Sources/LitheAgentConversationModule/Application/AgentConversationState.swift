@@ -65,6 +65,8 @@ public struct AgentConversation: Equatable, Sendable {
     public var plan: AgentPlan?
     /// Slash commands the agent currently advertises for this session.
     public var availableCommands: [AgentCommand] = []
+    /// Only local review acknowledgements; the Agent's transcript is unchanged.
+    public var reviewedFileChanges: [String: AgentFileChange] = [:]
     public var activeTurn: AgentTurnStatistics?
     var responsePhase: AgentResponseStatus = .waiting
     var retryTurnID: String?

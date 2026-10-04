@@ -146,6 +146,32 @@ drain 期间改名、改回或开始保存时，旧磁盘快照不得替换当�
 `Document closed` 红条，在取消策略下通过；运行入口仍为
 `scripts/probe-macos-monaco.sh --workbench-tests`。没有新增运行时资源或 bundle 写入。
 
+### 关闭模型后的过期符号高亮
+
+PR #1046 的 arm64 探针在分屏清理之后报告空模型的 URI 访问。固定 Monaco 0.55.1
+的符号高亮仍可能执行旧模型的回调，读取当前视图已经移除的模型；这条拒绝会进入
+同步失败保护，影响仍然打开的文档。受控回归捕获真实上游高亮回调，先让另一个
+视图产生有效高亮查询，再移除原模型、执行已排队回调，稳定复现同一错误和堆栈。
+
+共享编辑器在主视图、分屏和 diff 两侧安装 `word-highlight-lifecycle`，只给每个上游
+高亮实例绑定创建时的模型。模型已释放或视图已切换到另一模型时，旧回调立即结束；
+当前模型仍交给原上游高亮引擎计算。监听由视图拥有，视图释放时清理，不新增计时器、
+模型注册表、缓存或运行时资源。错误诊断桥接额外携带堆栈，原生探针记录它，产品
+提示仍只显示原来的错误消息。
+
+已检查固定包的 `esm/vs/editor/contrib/wordHighlighter/browser/wordHighlighter.js`，
+以及 [VS Code 的同源实现](https://github.com/microsoft/vscode/blob/445a177dce6c45e7dacaa8a9bb0d2f673467a1f9/src/vs/editor/contrib/wordHighlighter/browser/wordHighlighter.ts)。
+上游已有 Delayer 清理与部分拒绝处理，但 `_run` 入口仍会直接读取当前模型 URI。
+没有可启用的配置补上模型归属检查，所以兼容钩子限定在固定版本的实例方法；
+不修改第三方文件，也不重新实现高亮。升级 Monaco 时必须检查这两个内部成员和
+三个真实回归，上游自身拒绝过期模型后删除钩子。不要关闭整个符号高亮功能，
+也不要忽略所有 TypeError 或解除同步失败保护来使 CI 通过。
+
+macOS 的 `scripts/probe-macos-monaco.sh --workbench-tests` 覆盖主视图、分屏和 diff
+释放后的回调，仍验证存活文档可编辑、文本不变；每个高亮等待最多两秒，窗口和
+模型均清理。共享逻辑被 Windows 复用，但 macOS 原生探针不能代替 WebView2 实机
+验收，功能矩阵保持 pending。
+
 ### 轻点鼠标事件的 WebKit 兼容边界
 
 Issue #948 在微信输入法下快速轻点触控板会进入意外选区，关闭系统拖移仍复现，

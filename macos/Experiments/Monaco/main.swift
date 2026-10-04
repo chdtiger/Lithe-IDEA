@@ -398,7 +398,9 @@ final class Probe: NSObject, NSApplicationDelegate, WKScriptMessageHandlerWithRe
                 }
             case "failure":
                 replyHandler(["ok": true], nil)
-                finish(error: body["message"] as? String ?? "Unknown JavaScript failure")
+                let message = body["message"] as? String ?? "Unknown JavaScript failure"
+                let stack = body["stack"] as? String
+                finish(error: stack.map { "\(message)\n\($0)" } ?? message)
             default: throw ProbeError.invalid("Unknown bridge message")
             }
         } catch { replyHandler(nil, error.localizedDescription) }

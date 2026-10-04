@@ -1,4 +1,5 @@
 import * as monaco from "monaco-editor/esm/vs/editor/editor.api.js";
+import { installWordHighlightLifecycle } from "./word-highlight-lifecycle";
 import "monaco-editor/esm/vs/editor/editor.all.js";
 import { ensureMonacoLanguageTokenizer } from "./language-contributions";
 
@@ -73,6 +74,8 @@ export function mountDiffReview(container: HTMLElement,
   const modified = monaco.editor.createModel("", "plaintext", monaco.Uri.parse(`lithe-review://${instanceID}/modified`));
   editor.setModel({ original, modified });
   const left = editor.getOriginalEditor(), right = editor.getModifiedEditor();
+  installWordHighlightLifecycle(left);
+  installWordHighlightLifecycle(right);
   const leftDecorations = left.createDecorationsCollection();
   const rightDecorations = right.createDecorationsCollection();
   let leftRows: ReviewRow[] = [], rightRows: ReviewRow[] = [];

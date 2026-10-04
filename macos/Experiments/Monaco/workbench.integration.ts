@@ -25,6 +25,14 @@ const assertRejects = async (operation: () => Promise<unknown>, message: string)
   try { await operation(); } catch { return; }
   throw new Error(message);
 };
+const withDeadline = async <T>(operation: Promise<T>, message: string): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([operation, new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(message)), 2000);
+    })]);
+  } finally { if (timer !== undefined) clearTimeout(timer); }
+};
 
 async function verify() {
   await ready;
@@ -497,6 +505,62 @@ async function verify() {
     assert(document.getElementById("editor")?.style.width === "100%", "primary width was not restored");
     assert(editor.getModel()?.getValue() === "left", "split close changed primary document");
     await window.lithe.retain([]);
+  });
+  for (const closeSecondary of [false, true]) {
+    await check(`queued symbol highlighting is cancelled after ${closeSecondary ? "secondary" : "primary"} model close`, async () => {
+      type HighlightContribution = { wordHighlighter: { _run(): Promise<void> } | null };
+      const highlight = (view: monacoEditor.ICodeEditor) =>
+        view.getContribution<HighlightContribution & monacoEditor.IEditorContribution>("editor.contrib.wordHighlighter")!.wordHighlighter!;
+      await window.lithe.activate({ id: "highlight-primary", text: "word word", revision: 0, language: "plaintext", readonly: false });
+      await window.lithe.showSecondary({ id: "highlight-secondary", text: "word word", revision: 0, language: "plaintext", readonly: false });
+      const secondary = monacoEditor.getEditors().find(view => view !== editor)!;
+      const closing = closeSecondary ? secondary : editor;
+      const survivor = closeSecondary ? editor : secondary;
+      // Capture the actual upstream callback before close, then explicitly run
+      // it after model removal. No timer or guessed scheduling delay is needed.
+      const queuedHighlight = highlight(closing)._run.bind(highlight(closing));
+      try {
+        survivor.focus();
+        survivor.setPosition({ lineNumber: 1, column: 2 });
+        await withDeadline(highlight(survivor)._run(), "Live highlighting exceeded its deadline");
+        await window.lithe.retain([closeSecondary ? "highlight-primary" : "highlight-secondary"]);
+        assert(closing.getModel() === null, "closed view retained its model");
+        await withDeadline(queuedHighlight(), "Closed-model highlighting exceeded its deadline");
+        assert(!survivor.getOption(monacoEditor.EditorOption.readOnly), "stale highlight locked the surviving document");
+        assert(survivor.getModel()?.getValue() === "word word", "stale highlight changed the surviving document");
+      } finally {
+        window.lithe.hideSecondary();
+        await window.lithe.retain([]);
+      }
+    });
+  }
+  await check("queued symbol highlighting is cancelled after diff review disposal", async () => {
+    type HighlightContribution = monacoEditor.IEditorContribution & { wordHighlighter: { _run(): Promise<void> } | null };
+    const container = document.createElement("div");
+    container.style.cssText = "position:absolute;inset:0;height:400px";
+    document.body.append(container);
+    const review = mountDiffReview(container);
+    const row: ReviewRow = { id: "word", oldLine: 1, newLine: 1, left: "word", right: "word", kind: "context" };
+    let disposed = false;
+    try {
+      await review.update({ rows: [row], language: "plaintext" });
+      const closing = review.editor.getModifiedEditor();
+      const highlighter = closing.getContribution<HighlightContribution>("editor.contrib.wordHighlighter")!.wordHighlighter!;
+      const queuedHighlight = highlighter._run.bind(highlighter);
+      await window.lithe.activate({ id: "highlight-diff-survivor", text: "word word", revision: 0, language: "plaintext", readonly: false });
+      editor.focus();
+      editor.setPosition({ lineNumber: 1, column: 2 });
+      const live = editor.getContribution<HighlightContribution>("editor.contrib.wordHighlighter")!.wordHighlighter!;
+      await withDeadline(live._run(), "Live highlighting exceeded its deadline");
+      review.dispose(); disposed = true;
+      await withDeadline(queuedHighlight(), "Disposed-diff highlighting exceeded its deadline");
+      assert(editor.getModel()?.getValue() === "word word" && !editor.getOption(monacoEditor.EditorOption.readOnly),
+        "stale diff highlight changed or locked the live editor");
+    } finally {
+      if (!disposed) review.dispose();
+      container.remove();
+      await window.lithe.retain([]);
+    }
   });
   await check("host themes replace the Monaco surface and reveal the native wallpaper", async () => {
     await window.lithe.activate({
@@ -1634,4 +1698,4 @@ async function verify() {
   });
   await send({ type: "complete", cases, userAgent: navigator.userAgent });
 }
-void verify().catch(error => send({ type: "failure", message: String(error) }));
+void verify().catch(error => send({ type: "failure", message: error instanceof Error ? `${error}\n${error.stack ?? ""}` : String(error) }));
