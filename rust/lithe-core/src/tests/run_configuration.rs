@@ -2170,10 +2170,11 @@ fn run_configuration_inspection_invalidates_an_older_generator_revision() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// A workspace generated under revision 9 still carries the old classification.
-/// Upgrading must regenerate it without changing a surviving service id or losing
-/// its override, and must report the override of a service the coordinate fix
-/// removed as an orphan instead of dropping it silently.
+/// A workspace generated under revision 9 still carries the old classification:
+/// the loose match put `fake-b` into the document as a Spring Boot service.
+/// Upgrading must revert it -- the surviving service keeps its id and override,
+/// and the override of the removed fake service becomes an orphan diagnosis
+/// instead of disappearing silently.
 #[test]
 fn run_configuration_regeneration_keeps_surviving_ids_and_orphans_removed_overrides() {
     let root = temporary_root("run-config-regenerate-orphans");
@@ -2214,15 +2215,33 @@ fn run_configuration_regeneration_keeps_surviving_ids_and_orphans_removed_overri
         serde_json::json!({"root": root}),
     );
     let mut document = generated["generated"].clone();
-    let configurations = document["configurations"].as_array().unwrap();
-    assert!(configurations
+    {
+        let configurations = document["configurations"].as_array().unwrap();
+        assert!(configurations
+            .iter()
+            .any(|value| value["id"] == "quarkus.maven:service-a"));
+        assert!(!configurations
+            .iter()
+            .any(|value| value["id"] == "spring-boot.maven:fake-b"));
+    }
+    // Put back what revision 9 would have written: the loose match called fake-b
+    // a Spring Boot service, so the old document contains it whole.
+    let mut fake = document["configurations"]
+        .as_array()
+        .unwrap()
         .iter()
-        .any(|value| value["id"] == "quarkus.maven:service-a"));
-    assert!(!configurations
-        .iter()
-        .any(|value| value["id"] == "spring-boot.maven:fake-b"));
-    // Make the document look like one revision 9 produced, with the user
-    // overrides in place -- including one for the service the fix removes.
+        .find(|value| value["id"] == "quarkus.maven:service-a")
+        .expect("generated service should exist")
+        .clone();
+    fake["id"] = serde_json::json!("spring-boot.maven:fake-b");
+    fake["name"] = serde_json::json!("fake-b");
+    fake["provider"] = serde_json::json!("spring-boot.maven");
+    fake["source"] = serde_json::json!("fake-b/pom.xml");
+    fake["extensions"]["maven"]["module"] = serde_json::json!("fake-b");
+    document["configurations"]
+        .as_array_mut()
+        .unwrap()
+        .push(fake);
     document["generator"]["fingerprint"] = serde_json::json!(generator_fingerprint_for_revision(
         &document["generator"]["inputs"],
         "9",
@@ -2238,6 +2257,32 @@ fn run_configuration_regeneration_keeps_surviving_ids_and_orphans_removed_overri
     )
     .unwrap();
 
+    // Before upgrading, both services resolve and both overrides apply -- the
+    // fake service is not an orphan yet.
+    let before = call(
+        "resolve-before-upgrade",
+        "runConfig.resolve",
+        serde_json::json!({"root": root}),
+    );
+    let fake_before = before["configurations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|value| value["id"] == "spring-boot.maven:fake-b")
+        .unwrap_or_else(|| panic!("old fake service missing: {before}"));
+    assert_eq!(
+        fake_before["extensions"]["maven"]["jvmArguments"],
+        serde_json::json!(["-Xmx1g"])
+    );
+    assert!(
+        !before["diagnostics"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|value| value["code"] == "orphanedOverride"),
+        "{before}"
+    );
+
     let inspected = call(
         "inspect-after-upgrade",
         "runConfig.inspect",
@@ -2252,7 +2297,7 @@ fn run_configuration_regeneration_keeps_surviving_ids_and_orphans_removed_overri
         "{inspected}"
     );
 
-    // Regeneration keeps the surviving id and no longer lists the fake service.
+    // Regeneration keeps the surviving id and drops the fake service.
     let regenerated = call(
         "generate-after-upgrade",
         "runConfig.generate",
@@ -2275,6 +2320,8 @@ fn run_configuration_regeneration_keeps_surviving_ids_and_orphans_removed_overri
     )
     .unwrap();
 
+    // The surviving override still applies; the removed service override is
+    // reported as an orphan rather than dropped.
     let resolved = call(
         "resolve-after-upgrade",
         "runConfig.resolve",
