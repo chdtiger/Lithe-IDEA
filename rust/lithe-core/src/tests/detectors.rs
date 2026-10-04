@@ -2016,3 +2016,69 @@ fn maven_detector_restores_a_plugin_the_child_declares_itself() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+/// Maven interpolates expressions before it matches a parent, so two POMs that
+/// both write `${revision}` may resolve to different versions. A coordinate still
+/// carrying an expression proves nothing, so the reactor module that happens to
+/// share the raw text must not be offered as the parent -- the child keeps its own
+/// framework instead of inheriting the aggregator's.
+#[test]
+fn maven_detector_does_not_inherit_through_an_unresolved_expression() {
+    let root = temporary_root("detect-maven-unresolved-revision");
+    fs::create_dir_all(root.join("service-web")).unwrap();
+    fs::write(
+        root.join("pom.xml"),
+        "<project><modelVersion>4.0.0</modelVersion><groupId>com.example</groupId><artifactId>parent</artifactId><version>${revision}</version><properties><revision>1</revision></properties><packaging>pom</packaging><modules><module>service-web</module></modules><build><plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></project>",
+    )
+    .unwrap();
+    fs::write(
+        root.join("service-web/pom.xml"),
+        "<project><modelVersion>4.0.0</modelVersion><parent><groupId>com.example</groupId><artifactId>parent</artifactId><version>${revision}</version><relativePath>../../external-parent/pom.xml</relativePath></parent><artifactId>service-web</artifactId><version>${revision}</version><properties><revision>2</revision></properties><build><plugins><plugin><groupId>io.quarkus</groupId><artifactId>quarkus-maven-plugin</artifactId></plugin></plugins></build></project>",
+    )
+    .unwrap();
+
+    let providers = generated_configurations(&root)
+        .into_iter()
+        .filter(|item| {
+            item["id"] == "spring-boot.maven:service-web"
+                || item["id"] == "quarkus.maven:service-web"
+        })
+        .map(|item| item["provider"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        providers,
+        vec!["quarkus.maven".to_string()],
+        "an unresolved coordinate must not prove a parent"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Control for the rule above: with literal coordinates the same shape inherits
+/// normally, so the expression check rejects only what it cannot resolve.
+#[test]
+fn maven_detector_still_inherits_through_literal_coordinates() {
+    let root = temporary_root("detect-maven-literal-revision");
+    fs::create_dir_all(root.join("service-web")).unwrap();
+    fs::write(
+        root.join("pom.xml"),
+        "<project><modelVersion>4.0.0</modelVersion><groupId>com.example</groupId><artifactId>parent</artifactId><version>1.0</version><packaging>pom</packaging><modules><module>service-web</module></modules><build><plugins><plugin><groupId>org.springframework.boot</groupId><artifactId>spring-boot-maven-plugin</artifactId></plugin></plugins></build></project>",
+    )
+    .unwrap();
+    fs::write(
+        root.join("service-web/pom.xml"),
+        "<project><modelVersion>4.0.0</modelVersion><parent><groupId>com.example</groupId><artifactId>parent</artifactId><version>1.0</version></parent><artifactId>service-web</artifactId></project>",
+    )
+    .unwrap();
+
+    let ids = generated_configurations(&root)
+        .into_iter()
+        .filter(|item| item["provider"] == "spring-boot.maven")
+        .map(|item| item["id"].as_str().unwrap().to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(ids, vec!["spring-boot.maven:service-web".to_string()]);
+
+    fs::remove_dir_all(root).unwrap();
+}

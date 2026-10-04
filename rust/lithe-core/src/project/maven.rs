@@ -699,24 +699,55 @@ impl Descriptor {
     /// The coordinates a child must name in `<parent>` to inherit from this POM.
     ///
     /// `groupId` and `version` fall back to what `<parent>` declares, which is the
-    /// value Maven gives a module that inherits them.
+    /// value Maven gives a module that inherits them. A coordinate that is still a
+    /// `${...}` expression proves nothing -- see `still_an_expression`.
     fn coordinates(&self) -> Option<ModuleCoordinates> {
-        Some((
-            self.group_id.clone()?,
-            self.artifact_id.clone()?,
-            self.version.clone()?,
-        ))
+        verified_coordinates(
+            self.group_id.as_deref(),
+            self.artifact_id.as_deref(),
+            self.version.as_deref(),
+        )
     }
 
     /// The coordinates this POM names in its own `<parent>`, when it declares all
-    /// three. A partial declaration names no verifiable parent.
+    /// three. A partial declaration, or one still carrying a `${...}` expression,
+    /// names no verifiable parent.
     fn parent_key(&self) -> Option<ModuleCoordinates> {
-        Some((
-            self.parent_group_id.clone()?,
-            self.parent_artifact_id.clone()?,
-            self.parent_version.clone()?,
-        ))
+        verified_coordinates(
+            self.parent_group_id.as_deref(),
+            self.parent_artifact_id.as_deref(),
+            self.parent_version.as_deref(),
+        )
     }
+}
+
+/// Whether a coordinate value is still a `${...}` expression.
+///
+/// Maven interpolates expressions before it matches a parent, so the same raw text
+/// can resolve to different values: two POMs writing `${revision}` may end up with
+/// different versions once their own properties apply. A coordinate that has not
+/// been resolved therefore cannot prove which POM a module inherits from, and is
+/// refused rather than compared as a literal.
+fn still_an_expression(value: &str) -> bool {
+    value.contains("${")
+}
+
+/// Builds the `groupId:artifactId:version` triple a parent is identified by, or
+/// `None` when any part is missing or still an unresolved expression.
+fn verified_coordinates(
+    group_id: Option<&str>,
+    artifact_id: Option<&str>,
+    version: Option<&str>,
+) -> Option<ModuleCoordinates> {
+    let parts = [group_id?, artifact_id?, version?];
+    if parts.iter().any(|value| still_an_expression(value)) {
+        return None;
+    }
+    Some((
+        parts[0].to_string(),
+        parts[1].to_string(),
+        parts[2].to_string(),
+    ))
 }
 
 /// One `<build><plugins>` entry as Maven applies it.
