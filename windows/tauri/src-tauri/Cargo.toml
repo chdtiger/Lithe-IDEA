@@ -57,6 +57,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Threading",
 ] }
 webbrowser = "1.2.4"
+rusqlite = { version = "0.40.2", features = ["bundled"] }
 
 [profile.release]
 lto = "thin"

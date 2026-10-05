@@ -8,6 +8,7 @@ mod document;
 mod file_events;
 mod host;
 mod html_browser;
+mod ide_import;
 mod language_tools;
 mod logging;
 mod lsp;
@@ -194,6 +195,7 @@ fn main() {
             language_tools::check_language_tool_requirements,
             language_tools::cancel_language_tool_install,
             language_tools::uninstall_language_tools,
+            ide_import::get_importable_ide_projects,
             maven::maven_load_configuration,
             maven::maven_resolve_effective_configuration,
             maven::maven_write_configuration,

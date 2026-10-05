@@ -1,0 +1,23 @@
+{
+  "id": "ide-settings-import",
+  "area": "工作区",
+  "group": "项目浏览",
+  "capability": "从其它编辑器导入最近项目",
+  "macos": {
+    "evidence": [
+      "macos/Sources/Lithe"
+    ],
+    "implementationStatus": "missing",
+    "verificationStatus": "not-applicable"
+  },
+  "windows": {
+    "evidence": [
+      "windows/tauri/src/features/file-system/components/ide-settings-import-dialog.tsx",
+      "windows/tauri/src-tauri/src/ide_import.rs"
+    ],
+    "implementationStatus": "implemented",
+    "verificationStatus": "pending"
+  },
+  "owner": "Workspace",
+  "verification": "在 Windows 安装 VS Code、Cursor、JetBrains 与 Zed（或构造各自最近项目存储），打开导入对话框：列表按来源分组展示最近项目，仅包含仍存在的本地目录，WSL/SSH 等远程条目与单个文件条目不出现，重复路径跨来源去重；移除某个来源的存储后其余来源仍正常展示；未安装任何编辑器时列表为空且不报错。"
+}
