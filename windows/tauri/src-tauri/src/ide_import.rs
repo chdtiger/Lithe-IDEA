@@ -2,16 +2,23 @@
 //!
 //! Reads what each installed editor records for itself, without modifying any
 //! of it: the VS Code family keeps `history.recentlyOpenedPathsList` in
-//! `state.vscdb` (SQLite), Zed keeps its workspaces table in its own SQLite
-//! database, and JetBrains keeps `recentProjects.xml`. Every source is
-//! best-effort -- an absent, locked, or re-shaped store contributes nothing --
-//! because the dialog is a list of candidates, not an error reporter.
+//! `state.vscdb` (SQLite) under each product's `User` directory, Zed keeps its
+//! workspaces table in its own SQLite database, and JetBrains keeps
+//! `recentProjects.xml`. Every source is best-effort -- an absent, locked, or
+//! re-shaped store contributes nothing -- because the dialog is a list of
+//! candidates, not an error reporter.
+//!
+//! Stores open read-only with a short busy timeout: the editor may hold its
+//! database right now, and a missing list is an acceptable outcome.
 
-use quick_xml::{events::Event, Reader};
+use quick_xml::events::{BytesStart, Event};
+use quick_xml::Reader;
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OpenFlags};
 use serde::Serialize;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 /// One project another editor has listed, ready to be opened as a folder.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -26,8 +33,12 @@ pub struct ImportableIdeProject {
 /// Upper bound per source: this feeds a chooser dialog, not an archive.
 const MAX_PROJECTS_PER_SOURCE: usize = 100;
 
+/// How long a read-only open waits for a locked database before giving up.
+const BUSY_TIMEOUT: Duration = Duration::from_millis(300);
+
 /// VS Code family editors, by their `%APPDATA%` directory and the source id
-/// and display name the import dialog groups them under.
+/// and display name the import dialog groups them under. The `User` layer is
+/// appended when scanning.
 const VS_CODE_EDITORS: &[(&str, &str, &str)] = &[
     ("Code", "vscode", "VS Code"),
     ("Code - Insiders", "vscode-insiders", "VS Code"),
@@ -56,25 +67,30 @@ pub fn get_importable_ide_projects() -> Vec<ImportableIdeProject> {
 
 /// Collects projects from every installed editor. Split from the environment
 /// lookup so tests can point it at a prepared `%APPDATA%`-shaped directory.
+///
+/// Each source keeps its own list: a path two editors both remember stays
+/// listed under both, because the dialog imports only the source the user
+/// picked, and dropping the later one would empty that pick.
 fn scan_sources(
     appdata: &Path,
     local_appdata: Option<&Path>,
     user_profile: Option<&Path>,
 ) -> Vec<ImportableIdeProject> {
     let mut projects = Vec::new();
-    let mut seen = HashSet::new();
 
     for (directory, source_id, source_name) in VS_CODE_EDITORS {
+        let mut seen = HashSet::new();
         push_projects(
             &mut projects,
             &mut seen,
-            vs_code_recent_projects(&appdata.join(directory)),
+            vs_code_recent_projects(&appdata.join(directory).join("User")),
             source_id,
             source_name,
         );
     }
     if let Some(local_appdata) = local_appdata {
         for (channel, source_id) in ZED_CHANNELS {
+            let mut seen = HashSet::new();
             push_projects(
                 &mut projects,
                 &mut seen,
@@ -90,6 +106,7 @@ fn scan_sources(
             );
         }
     }
+    let mut seen = HashSet::new();
     push_projects(
         &mut projects,
         &mut seen,
@@ -101,7 +118,7 @@ fn scan_sources(
     projects
 }
 
-/// Keeps first-seen order, drops paths an earlier source already listed and
+/// Keeps first-seen order, drops paths this source already listed and
 /// directories that no longer exist, and stops at the per-source bound.
 fn push_projects(
     projects: &mut Vec<ImportableIdeProject>,
@@ -135,7 +152,8 @@ fn push_projects(
     }
 }
 
-/// Recent folders from one VS Code family editor, most recent first.
+/// Recent folders from one VS Code family editor's `User` directory, most
+/// recent first.
 ///
 /// Modern versions keep the list inside `state.vscdb`, and each profile
 /// carries its own store. Older versions kept the same document in
@@ -170,16 +188,13 @@ fn vs_code_recent_from_vscdb(path: &Path) -> Vec<String> {
     let Ok(connection) = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY) else {
         return Vec::new();
     };
+    let _ = connection.busy_timeout(BUSY_TIMEOUT);
     let Ok(mut statement) = connection
         .prepare("SELECT value FROM ItemTable WHERE key = 'history.recentlyOpenedPathsList'")
     else {
         return Vec::new();
     };
-    // VS Code stores the JSON as a BLOB; read bytes so either spelling works.
-    let Ok(bytes) = statement.query_row([], |row| row.get::<_, Vec<u8>>(0)) else {
-        return Vec::new();
-    };
-    let Ok(value) = String::from_utf8(bytes) else {
+    let Ok(value) = statement.query_row([], |row| sqlite_text(row.get_ref(0)?)) else {
         return Vec::new();
     };
     vs_code_recent_entries(&value)
@@ -209,30 +224,60 @@ fn vs_code_recent_entries(document: &str) -> Vec<String> {
 }
 
 /// Folder and workspace entries only: a `fileUri` names one file, and a
-/// remote URI (`vscode-remote://`, `file://wsl.localhost/...`) has no local
-/// folder to open.
+/// remote URI (`vscode-remote://`, `file://wsl.localhost/...`) names another
+/// machine.
+///
+/// A history entry for a multi-root window records the `.code-workspace`
+/// file; its roots are what can be opened as folders.
 fn vs_code_paths_from_list(list: &serde_json::Value) -> Vec<String> {
     let Some(entries) = list.get("entries").and_then(|value| value.as_array()) else {
         return Vec::new();
     };
     let mut paths = Vec::new();
     for entry in entries {
-        let uri = entry
-            .get("folderUri")
-            .or_else(|| {
-                entry
-                    .get("workspace")
-                    .and_then(|workspace| workspace.get("configPath"))
-            })
-            .and_then(|value| value.as_str());
-        let Some(uri) = uri else {
+        if let Some(uri) = entry.get("folderUri").and_then(|value| value.as_str()) {
+            if let Some(path) = local_path_from_file_uri(uri) {
+                paths.push(path);
+            }
             continue;
-        };
-        if let Some(path) = local_path_from_file_uri(uri) {
-            paths.push(path);
+        }
+        let config_uri = entry
+            .get("workspace")
+            .and_then(|workspace| workspace.get("configPath"))
+            .and_then(|value| value.as_str());
+        if let Some(config_path) = config_uri.and_then(local_path_from_file_uri) {
+            paths.extend(workspace_folder_paths(&config_path));
         }
     }
     paths
+}
+
+/// The roots a `.code-workspace` file lists. Relative entries resolve
+/// against the workspace file's own directory, the way VS Code resolves them.
+fn workspace_folder_paths(config_path: &str) -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(config_path) else {
+        return Vec::new();
+    };
+    let Ok(document) = serde_json::from_str::<serde_json::Value>(&text) else {
+        return Vec::new();
+    };
+    let Some(folders) = document.get("folders").and_then(|value| value.as_array()) else {
+        return Vec::new();
+    };
+    let base = Path::new(config_path).parent();
+    folders
+        .iter()
+        .filter_map(|folder| folder.get("path").and_then(|value| value.as_str()))
+        .filter_map(|path| {
+            let path = Path::new(path);
+            let resolved = if path.is_absolute() {
+                Some(path.to_path_buf())
+            } else {
+                base.map(|base| base.join(path))
+            };
+            resolved.map(|path| path.to_string_lossy().replace('/', "\\"))
+        })
+        .collect()
 }
 
 /// Converts a `file://` URI to a local path. Remote authorities such as
@@ -269,12 +314,13 @@ fn zed_recent_projects(database: &Path) -> Vec<String> {
     else {
         return Vec::new();
     };
+    let _ = connection.busy_timeout(BUSY_TIMEOUT);
     let Ok(mut statement) = connection.prepare(
         "SELECT paths FROM workspaces WHERE remote_connection_id IS NULL ORDER BY timestamp DESC",
     ) else {
         return Vec::new();
     };
-    let Ok(rows) = statement.query_map([], |row| row.get::<_, String>(0)) else {
+    let Ok(rows) = statement.query_map([], |row| sqlite_text(row.get_ref(0)?)) else {
         return Vec::new();
     };
     let mut paths = Vec::new();
@@ -284,19 +330,31 @@ fn zed_recent_projects(database: &Path) -> Vec<String> {
     paths
 }
 
-/// Zed stores the workspace roots as one column; a single-root workspace is a
-/// bare path, and a multi-root workspace has been seen as a JSON array.
+/// Zed's `PathList` serializes the workspace roots joined by newlines; a
+/// single-root workspace is simply one line.
 fn zed_paths_from_column(value: &str) -> Vec<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        return Vec::new();
-    }
-    if trimmed.starts_with('[') {
-        if let Ok(paths) = serde_json::from_str::<Vec<String>>(trimmed) {
-            return paths;
+    value
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_string)
+        .collect()
+}
+
+/// Reads a SQLite cell that may be stored as either TEXT or BLOB. The column
+/// declaration does not decide the storage class of each cell, and the
+/// editors have written both spellings.
+fn sqlite_text(value: ValueRef<'_>) -> rusqlite::Result<String> {
+    match value {
+        ValueRef::Text(bytes) | ValueRef::Blob(bytes) => {
+            Ok(String::from_utf8_lossy(bytes).into_owned())
         }
+        other => Err(rusqlite::Error::InvalidColumnType(
+            0,
+            "value".to_string(),
+            other.data_type(),
+        )),
     }
-    vec![trimmed.to_string()]
 }
 
 /// Recent projects from every installed JetBrains product. The store is
@@ -331,43 +389,48 @@ fn jetbrains_recent_from_xml(path: &Path, user_home: Option<&str>) -> Vec<String
 /// Reads `RecentProjectsManager`'s `additionalInfo` map keys: they are the
 /// project paths, with `$USER_HOME$` standing in for the user profile. A key
 /// that still contains an unresolved macro is skipped, not guessed at.
+///
+/// Real records wrap each key in `<entry><value><RecentProjectMetaInfo/></value>
+/// </entry>`, so both the open and the self-closing form are read.
 fn jetbrains_entries_from_document(document: &str, user_home: Option<&str>) -> Vec<String> {
     let mut reader = Reader::from_str(document);
     reader.config_mut().trim_text(true);
-    let mut inside_manager = false;
+    let mut in_manager = false;
+    let mut in_additional_info = false;
+    let mut in_map = false;
     let mut paths = Vec::new();
     loop {
         match reader.read_event() {
-            Ok(Event::Start(element)) => {
-                if element.local_name().as_ref() == b"component" {
-                    inside_manager = attribute_value(&element, b"name").as_deref()
+            Ok(Event::Start(element)) => match element.local_name().as_ref() {
+                b"component" => {
+                    in_manager = attribute_value(&element, b"name").as_deref()
                         == Some("RecentProjectsManager");
                 }
-            }
-            Ok(Event::End(element)) => {
-                if element.local_name().as_ref() == b"component" {
-                    inside_manager = false;
+                b"option" if in_manager && !in_map => {
+                    in_additional_info =
+                        attribute_value(&element, b"name").as_deref() == Some("additionalInfo");
                 }
-            }
+                b"map" if in_additional_info => in_map = true,
+                b"entry" if in_map => {
+                    collect_jetbrains_entry(&element, user_home, &mut paths);
+                }
+                _ => {}
+            },
             Ok(Event::Empty(element)) => {
-                if !inside_manager || element.local_name().as_ref() != b"entry" {
-                    continue;
+                if in_map && element.local_name().as_ref() == b"entry" {
+                    collect_jetbrains_entry(&element, user_home, &mut paths);
                 }
-                let Some(key) = attribute_value(&element, b"key") else {
-                    continue;
-                };
-                let resolved = match key.strip_prefix("$USER_HOME$") {
-                    Some(rest) => match user_home {
-                        Some(home) => format!("{home}{rest}"),
-                        None => continue,
-                    },
-                    None => key,
-                };
-                if resolved.contains('$') {
-                    continue;
-                }
-                paths.push(resolved.replace('/', "\\"));
             }
+            Ok(Event::End(element)) => match element.local_name().as_ref() {
+                b"component" => {
+                    in_manager = false;
+                    in_additional_info = false;
+                    in_map = false;
+                }
+                b"map" => in_map = false,
+                b"option" if !in_map => in_additional_info = false,
+                _ => {}
+            },
             Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
@@ -375,7 +438,28 @@ fn jetbrains_entries_from_document(document: &str, user_home: Option<&str>) -> V
     paths
 }
 
-fn attribute_value(element: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> Option<String> {
+fn collect_jetbrains_entry(
+    element: &BytesStart<'_>,
+    user_home: Option<&str>,
+    paths: &mut Vec<String>,
+) {
+    let Some(key) = attribute_value(element, b"key") else {
+        return;
+    };
+    let resolved = match key.strip_prefix("$USER_HOME$") {
+        Some(rest) => match user_home {
+            Some(home) => format!("{home}{rest}"),
+            None => return,
+        },
+        None => key,
+    };
+    if resolved.contains('$') {
+        return;
+    }
+    paths.push(resolved.replace('/', "\\"));
+}
+
+fn attribute_value(element: &BytesStart<'_>, name: &[u8]) -> Option<String> {
     element
         .attributes()
         .flatten()
@@ -383,10 +467,70 @@ fn attribute_value(element: &quick_xml::events::BytesStart<'_>, name: &[u8]) -> 
         .and_then(|attribute| attribute.unescape_value().ok())
         .map(|value| value.into_owned())
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn scratch_root(label: &str) -> PathBuf {
+        let root =
+            std::env::temp_dir().join(format!("lithe-ide-import-{}-{label}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("scratch root");
+        root
+    }
+
+    fn create_project(root: &Path, name: &str) -> PathBuf {
+        let project = root.join("projects").join(name);
+        std::fs::create_dir_all(&project).expect("project directory");
+        project
+    }
+
+    fn file_uri(path: &Path) -> String {
+        url::Url::from_file_path(path)
+            .expect("file path is absolute")
+            .to_string()
+    }
+
+    fn write_vscdb(path: &Path, value: &str, as_blob: bool) {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("store directory");
+        let connection = Connection::open(path).expect("scratch store");
+        connection
+            .execute_batch("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB);")
+            .expect("schema");
+        if as_blob {
+            connection
+                .execute(
+                    "INSERT INTO ItemTable (key, value) VALUES ('history.recentlyOpenedPathsList', ?1)",
+                    rusqlite::params![value.as_bytes().to_vec()],
+                )
+                .expect("row");
+        } else {
+            connection
+                .execute(
+                    "INSERT INTO ItemTable (key, value) VALUES ('history.recentlyOpenedPathsList', ?1)",
+                    rusqlite::params![value],
+                )
+                .expect("row");
+        }
+    }
+
+    fn write_zed_db(path: &Path, values: &[&str]) {
+        std::fs::create_dir_all(path.parent().expect("parent")).expect("store directory");
+        let connection = Connection::open(path).expect("scratch store");
+        connection
+            .execute_batch(
+                "CREATE TABLE workspaces (paths TEXT, remote_connection_id INTEGER, timestamp TEXT);",
+            )
+            .expect("schema");
+        for (index, value) in values.iter().enumerate() {
+            connection
+                .execute(
+                    "INSERT INTO workspaces (paths, remote_connection_id, timestamp) VALUES (?1, NULL, ?2)",
+                    rusqlite::params![value, format!("2026-10-0{index}")],
+                )
+                .expect("row");
+        }
+    }
 
     #[test]
     fn file_uris_map_to_local_paths_and_skip_remote_authorities() {
@@ -410,88 +554,186 @@ mod tests {
     }
 
     #[test]
-    fn vs_code_entries_keep_folders_and_workspaces_only() {
+    fn vs_code_entries_keep_folders_and_skip_files_and_remote_folders() {
         let document = r#"{"entries":[
             {"folderUri":"file:///d%3A/work/app"},
             {"fileUri":"file:///d%3A/work/app/README.md"},
-            {"workspace":{"configPath":"file:///d%3A/work/team.code-workspace"}},
             {"folderUri":"vscode-remote://ssh-remote+box/root"}
         ]}"#;
         assert_eq!(
             vs_code_recent_entries(document),
-            vec![
-                r"D:\work\app".to_string(),
-                r"D:\work\team.code-workspace".to_string()
-            ]
+            vec![r"D:\work\app".to_string()]
         );
     }
 
     #[test]
-    fn zed_paths_column_reads_single_and_multi_root_values() {
+    fn a_workspace_entry_resolves_to_the_folders_it_lists() {
+        let root = scratch_root("workspace");
+        let alpha = create_project(&root, "alpha");
+        let beta = create_project(&root, "beta");
+        let config = root.join("team.code-workspace");
+        std::fs::write(
+            &config,
+            format!(
+                r#"{{"folders":[{{"path":"projects/alpha"}},{{"path":"{}"}}]}}"#,
+                beta.to_string_lossy().replace('\\', "\\\\")
+            ),
+        )
+        .expect("workspace file");
+        let document = format!(
+            r#"{{"entries":[{{"workspace":{{"configPath":"{}"}}}}]}}"#,
+            file_uri(&config)
+        );
+        assert_eq!(
+            vs_code_recent_entries(&document),
+            vec![
+                alpha.to_string_lossy().into_owned(),
+                beta.to_string_lossy().into_owned()
+            ]
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn zed_paths_column_reads_newline_separated_roots() {
+        assert_eq!(
+            zed_paths_from_column("D:\\work\\a\nD:\\work\\b"),
+            vec![r"D:\work\a".to_string(), r"D:\work\b".to_string()]
+        );
         assert_eq!(
             zed_paths_from_column(r"D:\work\app"),
             vec![r"D:\work\app".to_string()]
         );
-        assert_eq!(
-            zed_paths_from_column(r#"["D:\\work\\a","D:\\work\\b"]"#),
-            vec![r"D:\work\a".to_string(), r"D:\work\b".to_string()]
-        );
-        assert!(zed_paths_from_column("   ").is_empty());
+        assert!(zed_paths_from_column("  \n \n").is_empty());
     }
 
     #[test]
-    fn jetbrains_entries_resolve_the_home_macro_and_skip_unknown_ones() {
+    fn jetbrains_entries_read_wrapped_and_self_closing_forms_inside_additional_info() {
         let document = r#"<application>
             <component name="RecentProjectsManager">
                 <option name="additionalInfo">
                     <map>
-                        <entry key="$USER_HOME$/IdeaProjects/alpha"/>
-                        <entry key="D:/work/beta"/>
-                        <entry key="$APPLICATION_HOME_DIR$/samples"/>
+                        <entry key="$USER_HOME$/projects/alpha">
+                            <value>
+                                <RecentProjectMetaInfo>
+                                    <option name="productionCode" value="IU" />
+                                </RecentProjectMetaInfo>
+                            </value>
+                        </entry>
+                        <entry key="D:/work/beta" />
+                        <entry key="$APPLICATION_HOME_DIR$/samples" />
                     </map>
                 </option>
             </component>
-            <component name="Unrelated">
-                <entry key="D:/ignored"/>
+            <component name="OtherComponent">
+                <option name="additionalInfo">
+                    <map>
+                        <entry key="D:/ignored" />
+                    </map>
+                </option>
             </component>
         </application>"#;
         assert_eq!(
             jetbrains_entries_from_document(document, Some("C:/Users/dev")),
             vec![
-                r"C:\Users\dev\IdeaProjects\alpha".to_string(),
+                r"C:\Users\dev\projects\alpha".to_string(),
                 r"D:\work\beta".to_string()
             ]
         );
     }
 
     #[test]
-    fn vscdb_recent_list_is_read_from_a_sqlite_store() {
-        let directory = std::env::temp_dir().join(format!(
-            "lithe-ide-import-{}-{}",
-            std::process::id(),
-            "vscdb"
-        ));
-        std::fs::create_dir_all(&directory).expect("scratch directory");
-        let database = directory.join("state.vscdb");
-        {
-            let connection = Connection::open(&database).expect("scratch store");
-            connection
-                .execute_batch("CREATE TABLE ItemTable (key TEXT PRIMARY KEY, value BLOB);")
-                .expect("schema");
-            connection
-                .execute(
-                    "INSERT INTO ItemTable (key, value) VALUES ('history.recentlyOpenedPathsList', ?1)",
-                    rusqlite::params![
-                        br#"{"entries":[{"folderUri":"file:///d%3A/work/app"}]}"#.to_vec()
-                    ],
-                )
-                .expect("row");
-        }
-        assert_eq!(
-            vs_code_recent_from_vscdb(&database),
-            vec![r"D:\work\app".to_string()]
+    fn vscdb_blob_and_text_values_are_both_read() {
+        let root = scratch_root("vscdb-bindings");
+        let project = create_project(&root, "app");
+        let value = format!(
+            r#"{{"entries":[{{"folderUri":"{}"}}]}}"#,
+            file_uri(&project)
         );
-        let _ = std::fs::remove_dir_all(directory);
+        let expected = vec![project.to_string_lossy().into_owned()];
+        let blob_store = root.join("blob").join("state.vscdb");
+        write_vscdb(&blob_store, &value, true);
+        assert_eq!(vs_code_recent_from_vscdb(&blob_store), expected);
+        let text_store = root.join("text").join("state.vscdb");
+        write_vscdb(&text_store, &value, false);
+        assert_eq!(vs_code_recent_from_vscdb(&text_store), expected);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scan_sources_reads_appdata_shaped_editors_and_keeps_each_source_list() {
+        let root = scratch_root("e2e");
+        let alpha = create_project(&root, "alpha");
+        let beta = create_project(&root, "beta");
+        let gamma = create_project(&root, "gamma");
+        let appdata = root.join("appdata");
+
+        // VS Code and Cursor both remember alpha; the same path must stay
+        // under both sources because the dialog imports one source at a time.
+        for editor in ["Code", "Cursor"] {
+            write_vscdb(
+                &appdata
+                    .join(editor)
+                    .join("User")
+                    .join("globalStorage")
+                    .join("state.vscdb"),
+                &format!(r#"{{"entries":[{{"folderUri":"{}"}}]}}"#, file_uri(&alpha)),
+                editor == "Code",
+            );
+        }
+        let jetbrains_options = appdata.join("JetBrains").join("Idea2024.3").join("options");
+        std::fs::create_dir_all(&jetbrains_options).expect("jetbrains options");
+        std::fs::write(
+            jetbrains_options.join("recentProjects.xml"),
+            format!(
+                r#"<application><component name="RecentProjectsManager"><option name="additionalInfo"><map><entry key="{}"><value><RecentProjectMetaInfo/></value></entry></map></option></component></application>"#,
+                beta.to_string_lossy().replace('\\', "/")
+            ),
+        )
+        .expect("jetbrains store");
+        let local = root.join("local");
+        write_zed_db(
+            &local
+                .join("Zed")
+                .join("db")
+                .join("0-stable")
+                .join("db.sqlite"),
+            &[&format!(
+                "{}\n{}",
+                gamma.to_string_lossy(),
+                beta.to_string_lossy()
+            )],
+        );
+
+        let projects = scan_sources(&appdata, Some(&local), Some(&root));
+
+        let alpha_path = alpha.to_string_lossy().into_owned();
+        let beta_path = beta.to_string_lossy().into_owned();
+        let gamma_path = gamma.to_string_lossy().into_owned();
+        for source in ["vscode", "cursor"] {
+            assert!(
+                projects
+                    .iter()
+                    .any(|project| project.source_id == source && project.path == alpha_path),
+                "{source} should keep alpha: {projects:?}"
+            );
+        }
+        assert!(
+            projects
+                .iter()
+                .any(|project| project.source_id == "jetbrains" && project.path == beta_path),
+            "{projects:?}"
+        );
+        for path in [&gamma_path, &beta_path] {
+            assert!(
+                projects
+                    .iter()
+                    .any(|project| project.source_id == "zed" && &project.path == path),
+                "{projects:?}"
+            );
+        }
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]
