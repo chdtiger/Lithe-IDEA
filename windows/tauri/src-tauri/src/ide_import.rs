@@ -119,7 +119,14 @@ fn scan_sources(
 }
 
 /// Keeps first-seen order, drops paths this source already listed and
-/// directories that no longer exist, and stops at the per-source bound.
+/// entries that are not local directories, and stops at the per-source
+/// bound -- after filtering, so repeated or dead entries never consume the
+/// budget of live ones.
+///
+/// Relative paths are refused: they would resolve against whatever the
+/// process happens to have as its working directory. UNC and WSL paths are
+/// refused for the same reason the VS Code family's remote authorities are:
+/// they name another machine, not a folder this window can open.
 fn push_projects(
     projects: &mut Vec<ImportableIdeProject>,
     seen: &mut HashSet<String>,
@@ -127,9 +134,16 @@ fn push_projects(
     source_id: &str,
     source_name: &str,
 ) {
-    for path in paths.into_iter().take(MAX_PROJECTS_PER_SOURCE) {
+    let mut added = 0;
+    for path in paths {
+        if added >= MAX_PROJECTS_PER_SOURCE {
+            break;
+        }
         let path = path.trim_end_matches(['\\', '/']).to_string();
-        if path.is_empty() || !Path::new(&path).is_dir() {
+        if path.is_empty() || !Path::new(&path).is_absolute() || path.starts_with("\\\\") {
+            continue;
+        }
+        if !Path::new(&path).is_dir() {
             continue;
         }
         if !seen.insert(path.replace('/', "\\").to_lowercase()) {
@@ -149,6 +163,7 @@ fn push_projects(
             source_id: source_id.to_string(),
             source_name: source_name.to_string(),
         });
+        added += 1;
     }
 }
 
@@ -666,6 +681,7 @@ mod tests {
         let alpha = create_project(&root, "alpha");
         let beta = create_project(&root, "beta");
         let gamma = create_project(&root, "gamma");
+        let delta = create_project(&root, "delta");
         let appdata = root.join("appdata");
 
         // VS Code and Cursor both remember alpha; the same path must stay
@@ -681,6 +697,29 @@ mod tests {
                 editor == "Code",
             );
         }
+        // A profile keeps its own store next to the default one.
+        write_vscdb(
+            &appdata
+                .join("Code")
+                .join("User")
+                .join("profiles")
+                .join("team")
+                .join("globalStorage")
+                .join("state.vscdb"),
+            &format!(r#"{{"entries":[{{"folderUri":"{}"}}]}}"#, file_uri(&gamma)),
+            true,
+        );
+        // An editor that only ever wrote the legacy storage.json still counts.
+        let legacy = appdata.join("Windsurf").join("User").join("globalStorage");
+        std::fs::create_dir_all(&legacy).expect("legacy directory");
+        std::fs::write(
+            legacy.join("storage.json"),
+            format!(
+                r#"{{"history":{{"recentlyOpenedPathsList":{{"entries":[{{"folderUri":"{}"}}]}}}}}}"#,
+                file_uri(&delta)
+            ),
+        )
+        .expect("legacy store");
         let jetbrains_options = appdata.join("JetBrains").join("Idea2024.3").join("options");
         std::fs::create_dir_all(&jetbrains_options).expect("jetbrains options");
         std::fs::write(
@@ -710,6 +749,7 @@ mod tests {
         let alpha_path = alpha.to_string_lossy().into_owned();
         let beta_path = beta.to_string_lossy().into_owned();
         let gamma_path = gamma.to_string_lossy().into_owned();
+        let delta_path = delta.to_string_lossy().into_owned();
         for source in ["vscode", "cursor"] {
             assert!(
                 projects
@@ -718,6 +758,18 @@ mod tests {
                 "{source} should keep alpha: {projects:?}"
             );
         }
+        assert!(
+            projects
+                .iter()
+                .any(|project| project.source_id == "vscode" && project.path == gamma_path),
+            "the Code profile store should contribute gamma: {projects:?}"
+        );
+        assert!(
+            projects
+                .iter()
+                .any(|project| project.source_id == "windsurf" && project.path == delta_path),
+            "the legacy storage.json should contribute delta: {projects:?}"
+        );
         assert!(
             projects
                 .iter()
@@ -733,6 +785,65 @@ mod tests {
             );
         }
 
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn a_locked_store_fails_within_the_busy_timeout() {
+        let root = scratch_root("locked-store");
+        let store = root.join("state.vscdb");
+        write_vscdb(&store, r#"{"entries":[]}"#, true);
+        let locker = Connection::open(&store).expect("locker");
+        locker
+            .execute_batch(
+                "PRAGMA locking_mode = EXCLUSIVE;\nCREATE TABLE guard (value INTEGER);\nINSERT INTO guard VALUES (1);",
+            )
+            .expect("exclusive lock");
+        let started = std::time::Instant::now();
+        let paths = vs_code_recent_from_vscdb(&store);
+        let elapsed = started.elapsed();
+        drop(locker);
+        assert!(paths.is_empty(), "{paths:?}");
+        assert!(elapsed < Duration::from_secs(2), "{elapsed:?}");
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn non_local_and_relative_paths_are_refused() {
+        let mut projects = Vec::new();
+        let mut seen = HashSet::new();
+        push_projects(
+            &mut projects,
+            &mut seen,
+            vec![
+                r"\\server\share\project".to_string(),
+                r"\\wsl$\Ubuntu\home\dev\project".to_string(),
+                "relative/project".to_string(),
+                r".\another".to_string(),
+            ],
+            "jetbrains",
+            "JetBrains",
+        );
+        assert!(projects.is_empty(), "{projects:?}");
+    }
+
+    #[test]
+    fn repeated_entries_do_not_consume_the_per_source_budget() {
+        let root = scratch_root("budget");
+        let alpha = create_project(&root, "alpha");
+        let beta = create_project(&root, "beta");
+        let mut paths = vec![alpha.to_string_lossy().into_owned(); 100];
+        paths.push(beta.to_string_lossy().into_owned());
+        let mut projects = Vec::new();
+        let mut seen = HashSet::new();
+        push_projects(&mut projects, &mut seen, paths, "vscode", "VS Code");
+        assert_eq!(projects.len(), 2, "{projects:?}");
+        assert!(
+            projects
+                .iter()
+                .any(|project| project.path == beta.to_string_lossy()),
+            "{projects:?}"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 
