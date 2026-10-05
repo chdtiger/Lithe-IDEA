@@ -19,5 +19,5 @@
     "verificationStatus": "pending"
   },
   "owner": "Workspace",
-  "verification": "在 Windows 安装 VS Code、Cursor、JetBrains 与 Zed（或构造各自最近项目存储），打开导入对话框：列表按来源分组展示最近项目，仅包含仍存在的本地目录，WSL/SSH 等远程条目与单个文件条目不出现，重复路径跨来源去重；移除某个来源的存储后其余来源仍正常展示；未安装任何编辑器时列表为空且不报错。"
+  "verification": "在 Windows 安装 VS Code、Cursor、JetBrains 与 Zed（或构造各自最近项目存储），打开导入对话框：列表按来源分组展示最近项目，仅包含仍存在的本地目录，WSL/SSH 等远程条目与单个文件条目不出现，同一路径可同时属于多个来源（按来源分别保留，写入最近项目时去重）；.code-workspace 按 JSONC 解析（注释与尾逗号合法）；编辑器存储被占用时只读打开、等待有界（约 300ms 后跳过该来源）；移除某个来源的存储后其余来源仍正常展示；未安装任何编辑器时列表为空且不报错。"
 }

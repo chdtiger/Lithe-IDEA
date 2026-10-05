@@ -273,7 +273,23 @@ fn workspace_folder_paths(config_path: &str) -> Vec<String> {
     let Ok(text) = std::fs::read_to_string(config_path) else {
         return Vec::new();
     };
-    let Ok(document) = serde_json::from_str::<serde_json::Value>(&text) else {
+    // VS Code parses `.code-workspace` as JSONC: comments and trailing commas
+    // are valid, so plain `serde_json` would drop such a workspace entirely.
+    // The remaining JSON5-style extensions stay off to match the editor.
+    let options = jsonc_parser::ParseOptions {
+        allow_comments: true,
+        allow_loose_object_property_names: false,
+        allow_trailing_commas: true,
+        allow_missing_commas: false,
+        allow_single_quoted_strings: false,
+        allow_hexadecimal_numbers: false,
+        allow_unary_plus_numbers: false,
+        allow_bare_decimal_point_numbers: false,
+        allow_non_finite_numbers: false,
+        allow_extended_string_escapes: false,
+    };
+    let Ok(document) = jsonc_parser::parse_to_serde_value::<serde_json::Value>(&text, &options)
+    else {
         return Vec::new();
     };
     let Some(folders) = document.get("folders").and_then(|value| value.as_array()) else {
@@ -587,25 +603,47 @@ mod tests {
         let alpha = create_project(&root, "alpha");
         let beta = create_project(&root, "beta");
         let config = root.join("team.code-workspace");
-        std::fs::write(
-            &config,
-            format!(
-                r#"{{"folders":[{{"path":"projects/alpha"}},{{"path":"{}"}}]}}"#,
-                beta.to_string_lossy().replace('\\', "\\\\")
-            ),
-        )
-        .expect("workspace file");
         let document = format!(
             r#"{{"entries":[{{"workspace":{{"configPath":"{}"}}}}]}}"#,
             file_uri(&config)
         );
-        assert_eq!(
-            vs_code_recent_entries(&document),
-            vec![
-                alpha.to_string_lossy().into_owned(),
-                beta.to_string_lossy().into_owned()
-            ]
-        );
+        let expected = vec![
+            alpha.to_string_lossy().into_owned(),
+            beta.to_string_lossy().into_owned(),
+        ];
+        let beta_json = beta.to_string_lossy().replace('\\', "\\\\");
+        // VS Code accepts JSONC in `.code-workspace` files, so the plain,
+        // commented and trailing-comma spellings must resolve the same roots.
+        let fixtures = [
+            format!(
+                r#"{{"folders":[{{"path":"projects/alpha"}},{{"path":"{}"}}]}}"#,
+                beta_json
+            ),
+            format!(
+                "{{\n  // roots\n  \"folders\": [\n    {{ \"path\": \"projects/alpha\" }},\n    /* absolute root */\n    {{ \"path\": \"{}\" }}\n  ]\n}}\n",
+                beta_json
+            ),
+            format!(
+                r#"{{"folders":[{{"path":"projects/alpha"}},{{"path":"{}"}},],"settings":{{}},}}"#,
+                beta_json
+            ),
+        ];
+        for fixture in fixtures {
+            std::fs::write(&config, fixture).expect("workspace file");
+            assert_eq!(
+                vs_code_recent_entries(&document),
+                expected,
+                "every JSONC spelling should resolve both roots"
+            );
+        }
+        // A comma-less document is not JSONC: the parser must not accept it
+        // only because JSON5-style extensions are one option away.
+        std::fs::write(
+            &config,
+            r#"{"folders":[{"path":"projects/alpha"}{"path":"projects/alpha"}]}"#,
+        )
+        .expect("workspace file");
+        assert!(vs_code_recent_entries(&document).is_empty());
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -697,7 +735,20 @@ mod tests {
                 editor == "Code",
             );
         }
-        // A profile keeps its own store next to the default one.
+        // A profile keeps its own store next to the default one. Its history
+        // also points at a JSONC workspace file (comment + trailing comma):
+        // both its relative and absolute roots must become candidates.
+        let epsilon = create_project(&root, "epsilon");
+        let zeta = create_project(&root, "zeta");
+        let workspace = root.join("team.code-workspace");
+        std::fs::write(
+            &workspace,
+            format!(
+                "{{\n  // roots\n  \"folders\": [\n    {{ \"path\": \"projects/epsilon\" }},\n    {{ \"path\": \"{}\" }},\n  ],\n}}\n",
+                zeta.to_string_lossy().replace('\\', "\\\\")
+            ),
+        )
+        .expect("workspace file");
         write_vscdb(
             &appdata
                 .join("Code")
@@ -706,7 +757,11 @@ mod tests {
                 .join("team")
                 .join("globalStorage")
                 .join("state.vscdb"),
-            &format!(r#"{{"entries":[{{"folderUri":"{}"}}]}}"#, file_uri(&gamma)),
+            &format!(
+                r#"{{"entries":[{{"folderUri":"{}"}},{{"workspace":{{"configPath":"{}"}}}}]}}"#,
+                file_uri(&gamma),
+                file_uri(&workspace)
+            ),
             true,
         );
         // An editor that only ever wrote the legacy storage.json still counts.
@@ -750,6 +805,8 @@ mod tests {
         let beta_path = beta.to_string_lossy().into_owned();
         let gamma_path = gamma.to_string_lossy().into_owned();
         let delta_path = delta.to_string_lossy().into_owned();
+        let epsilon_path = epsilon.to_string_lossy().into_owned();
+        let zeta_path = zeta.to_string_lossy().into_owned();
         for source in ["vscode", "cursor"] {
             assert!(
                 projects
@@ -764,6 +821,14 @@ mod tests {
                 .any(|project| project.source_id == "vscode" && project.path == gamma_path),
             "the Code profile store should contribute gamma: {projects:?}"
         );
+        for path in [&epsilon_path, &zeta_path] {
+            assert!(
+                projects
+                    .iter()
+                    .any(|project| project.source_id == "vscode" && &project.path == path),
+                "JSONC workspace roots should be vscode candidates: {projects:?}"
+            );
+        }
         assert!(
             projects
                 .iter()

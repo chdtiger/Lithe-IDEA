@@ -58,6 +58,7 @@ windows-sys = { version = "0.61", features = [
 ] }
 webbrowser = "1.2.4"
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+jsonc-parser = { version = "0.34", features = ["serde"] }
 
 [profile.release]
 lto = "thin"
