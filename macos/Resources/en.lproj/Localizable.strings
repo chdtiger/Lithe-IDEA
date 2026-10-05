@@ -1380,9 +1380,9 @@
 "Edits" = "Edits";
 "Done" = "Done";
 "Open file" = "Open file";
-"No tasks have been reported yet." = "No tasks have been reported yet.";
-"No tools are running." = "No tools are running.";
-"No file edits to review." = "No file edits to review.";
+"No tasks yet" = "No tasks yet";
+"No tools running" = "No tools running";
+"No file edits" = "No file edits";
 "Roll back all" = "Roll back all";
 "Keep all" = "Keep all";
 "The Agent already saved these files. Mark the current changes as reviewed." = "The Agent already saved these files. Mark the current changes as reviewed.";

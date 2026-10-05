@@ -7,6 +7,8 @@ struct AgentToolGroupView: View {
     let searchText: String
     let onOpenFile: (AgentToolDetails.Location) -> Void
     var initiallyExpanded = false
+    /// Activity panels already have a tab label and an outer shared surface.
+    var embedded = false
 
     @State private var expanded = false
     @State private var expandedToolID: String?
@@ -23,29 +25,31 @@ struct AgentToolGroupView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            Button { expanded.toggle() } label: {
-                HStack(spacing: 8) {
-                    Text("Tool activity (\(messages.count))")
-                        .font(LitheTheme.uiFont(size: 12, weight: .semibold))
-                        .foregroundStyle(LitheTheme.primaryText)
-                        .lineLimit(1)
-                    Spacer(minLength: 4)
-                    summary
-                    Image(systemName: expanded ? "chevron.down" : "chevron.right")
-                        .font(LitheTheme.uiFont(size: 10))
-                        .foregroundStyle(LitheTheme.tertiaryText)
+            if !embedded {
+                Button { expanded.toggle() } label: {
+                    HStack(spacing: 8) {
+                        Text("Tool activity (\(messages.count))")
+                            .font(LitheTheme.uiFont(size: 12, weight: .semibold))
+                            .foregroundStyle(LitheTheme.primaryText)
+                            .lineLimit(1)
+                        Spacer(minLength: 4)
+                        summary
+                        Image(systemName: expanded ? "chevron.down" : "chevron.right")
+                            .font(LitheTheme.uiFont(size: 10))
+                            .foregroundStyle(LitheTheme.tertiaryText)
+                    }
+                    .padding(.horizontal, 10)
+                    .frame(height: 34)
+                    .contentShape(Rectangle())
                 }
-                .padding(.horizontal, 10)
-                .frame(height: 34)
-                .contentShape(Rectangle())
+                .buttonStyle(.litheNoPress)
+                .help(expanded ? "Hide tool details" : "Show tool details")
             }
-            .buttonStyle(.litheNoPress)
-            .help(expanded ? "Hide tool details" : "Show tool details")
 
-            if expanded {
-                Rectangle()
-                    .fill(LitheTheme.panelBorder)
-                    .frame(height: 1)
+            if expanded || embedded {
+                if !embedded {
+                    Rectangle().fill(LitheTheme.panelBorder).frame(height: 1)
+                }
                 ScrollView(.vertical) {
                     LazyVStack(alignment: .leading, spacing: 0) {
                         ForEach(displayedMessages) { message in
@@ -55,14 +59,15 @@ struct AgentToolGroupView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 4)
                 }
+                .litheScrollViewChrome()
                 .frame(height: CGFloat(min(displayedMessages.count, 4)) * 32 + (hasExpandedDetails ? 168 : 8))
             }
         }
         .frame(maxWidth: .infinity)
-        .background(LitheTheme.raised, in: RoundedRectangle(cornerRadius: 6))
+        .background(embedded ? Color.clear : LitheTheme.raised, in: RoundedRectangle(cornerRadius: 6))
         .overlay(
             RoundedRectangle(cornerRadius: 6)
-                .stroke(failedCount > 0 ? LitheTheme.error.opacity(0.7) : LitheTheme.panelBorder, lineWidth: 1)
+                .stroke(embedded ? Color.clear : (failedCount > 0 ? LitheTheme.error.opacity(0.7) : LitheTheme.panelBorder), lineWidth: 1)
         )
         .onAppear { if initiallyExpanded || !searchText.isEmpty { expanded = true } }
         .onChange(of: searchText) { _ in if !searchText.isEmpty { expanded = true } }

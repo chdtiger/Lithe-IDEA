@@ -67,46 +67,50 @@ struct AgentThoughtExpansion {
 struct AgentPlanView: View {
     let plan: AgentPlan
     let isResponding: Bool
+    let embedded: Bool
     @State private var expanded = false
 
-    init(plan: AgentPlan, isResponding: Bool, expanded: Bool = false) {
+    init(plan: AgentPlan, isResponding: Bool, expanded: Bool = false, embedded: Bool = false) {
         self.plan = plan
         self.isResponding = isResponding
+        self.embedded = embedded
         _expanded = State(initialValue: expanded)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Button { expanded.toggle() } label: {
-                HStack(spacing: 7) {
-                    Image(systemName: "list.bullet.clipboard")
-                        .font(.system(size: 10.5))
-                        .foregroundStyle(plan.isComplete ? LitheTheme.success : LitheTheme.accent)
-                    Text(String(format: String(localized: "Plan %lld/%lld"), plan.completedCount, plan.entries.count))
-                        .font(.system(size: 11.5, weight: .semibold))
-                        .foregroundStyle(LitheTheme.primaryText)
-                        .monospacedDigit()
-                    if !expanded, let current = plan.currentEntry {
-                        Text(current.content)
-                            .font(.system(size: 11.5))
-                            .foregroundStyle(LitheTheme.secondaryText)
-                            .lineLimit(1)
-                            .truncationMode(.tail)
+            if !embedded {
+                Button { expanded.toggle() } label: {
+                    HStack(spacing: 7) {
+                        Image(systemName: "list.bullet.clipboard")
+                            .font(.system(size: 10.5))
+                            .foregroundStyle(plan.isComplete ? LitheTheme.success : LitheTheme.accent)
+                        Text(String(format: String(localized: "Plan %lld/%lld"), plan.completedCount, plan.entries.count))
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .foregroundStyle(LitheTheme.primaryText)
+                            .monospacedDigit()
+                        if !expanded, let current = plan.currentEntry {
+                            Text(current.content)
+                                .font(.system(size: 11.5))
+                                .foregroundStyle(LitheTheme.secondaryText)
+                                .lineLimit(1)
+                                .truncationMode(.tail)
+                        }
+                        Spacer(minLength: 4)
+                        Image(systemName: expanded ? "chevron.down" : "chevron.up")
+                            .font(.system(size: 9))
+                            .foregroundStyle(LitheTheme.tertiaryText)
                     }
-                    Spacer(minLength: 4)
-                    Image(systemName: expanded ? "chevron.down" : "chevron.up")
-                        .font(.system(size: 9))
-                        .foregroundStyle(LitheTheme.tertiaryText)
+                    .padding(.horizontal, 10)
+                    .frame(height: 28)
+                    .contentShape(Rectangle())
                 }
-                .padding(.horizontal, 10)
-                .frame(height: 28)
-                .contentShape(Rectangle())
+                .buttonStyle(.litheNoPress)
+                .help(expanded ? "Hide plan" : "Show plan")
             }
-            .buttonStyle(.litheNoPress)
-            .help(expanded ? "Hide plan" : "Show plan")
 
-            if expanded {
-                Rectangle().fill(LitheTheme.panelBorder).frame(height: 1)
+            if expanded || embedded {
+                if !embedded { Rectangle().fill(LitheTheme.panelBorder).frame(height: 1) }
                 ScrollView(.vertical) {
                     VStack(alignment: .leading, spacing: 6) {
                         ForEach(Array(plan.entries.enumerated()), id: \.offset) { _, entry in
@@ -116,15 +120,16 @@ struct AgentPlanView: View {
                     .padding(.horizontal, 10)
                     .padding(.vertical, 8)
                 }
+                .litheScrollViewChrome()
                 .frame(maxHeight: 180)
                 .fixedSize(horizontal: false, vertical: true)
             }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(AgentPanelStyle.header, in: RoundedRectangle(cornerRadius: 5))
-        .overlay(RoundedRectangle(cornerRadius: 5).stroke(AgentPanelStyle.border, lineWidth: 1))
-        .padding(.horizontal, 18)
-        .padding(.bottom, 4)
+        .background(embedded ? Color.clear : AgentPanelStyle.header, in: RoundedRectangle(cornerRadius: 5))
+        .overlay(RoundedRectangle(cornerRadius: 5).stroke(embedded ? Color.clear : AgentPanelStyle.border, lineWidth: 1))
+        .padding(.horizontal, embedded ? 0 : 18)
+        .padding(.bottom, embedded ? 0 : 4)
     }
 
     private func entryRow(_ entry: AgentPlan.Entry) -> some View {

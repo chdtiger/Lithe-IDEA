@@ -2649,9 +2649,9 @@
 
 // Agent activity panels and file review
 "Open file" = "打开文件";
-"No tasks have been reported yet." = "Agent 尚未上报任务。";
-"No tools are running." = "当前没有运行中的工具。";
-"No file edits to review." = "没有待查看的文件修改。";
+"No tasks yet" = "暂无任务";
+"No tools running" = "暂无工具运行";
+"No file edits" = "暂无文件修改";
 "Roll back all" = "回撤全部";
 "Keep all" = "保留全部";
 "The Agent already saved these files. Mark the current changes as reviewed." = "Agent 已将修改写入文件；此操作将当前修改标为已确认。";

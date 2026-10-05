@@ -36,42 +36,21 @@ struct AgentActivitySummaryBar: View {
     private var activity: AgentActivity { AgentActivity(messages: messages, reviewed: reviewed) }
 
     var body: some View {
-        HStack(spacing: 0) {
-            ForEach(Panel.allCases, id: \.self) { item in
-                if item != .tasks { Divider().frame(height: 14).overlay(AgentPanelStyle.border) }
-                Button { panel = panel == item ? nil : item } label: {
-                    HStack(spacing: 5) {
-                        Image(systemName: item.icon).font(LitheTheme.uiFont(size: 10))
-                        Text(item.title)
-                        badge(item)
+        GeometryReader { geometry in
+            tabs
+                .litheDropdown(isPresented: Binding(get: { panel != nil }, set: { if !$0 { panel = nil } }), opensUpward: true) {
+                    if let panel {
+                        AgentActivityDetailsView(panel: panel, activity: activity, plan: plan, width: geometry.size.width,
+                            isResponding: isResponding, isReviewing: isReviewing, reviewError: reviewError,
+                            onOpenFile: onOpenFile, onDiff: { change in self.panel = nil; selectedDiff = change },
+                            onKeep: onKeep, onRequestRestore: { changes in
+                                self.panel = nil
+                                confirmation = changes
+                            })
                     }
-                    .foregroundStyle(panel == item ? AgentPanelStyle.text : AgentPanelStyle.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 30)
-                    .background(panel == item ? AgentPanelStyle.selected : Color.clear, in: RoundedRectangle(cornerRadius: 4))
-                    .contentShape(Rectangle())
                 }
-                .buttonStyle(.litheNoPress)
-                .litheRowHover()
-                .accessibilityIdentifier("agent-activity-\(item.rawValue)")
-                .accessibilityValue(count(item))
-                .help(item.title)
-            }
         }
-        .font(LitheTheme.uiFont(size: 11))
         .frame(height: 32)
-        .background(AgentPanelStyle.header, in: RoundedRectangle(cornerRadius: 5))
-        .overlay(RoundedRectangle(cornerRadius: 5).stroke(AgentPanelStyle.border, lineWidth: 1))
-        .litheDropdown(isPresented: Binding(get: { panel != nil }, set: { if !$0 { panel = nil } }), opensUpward: true) {
-            if let panel {
-                AgentActivityDetailsView(panel: panel, activity: activity, plan: plan,
-                    isResponding: isResponding, isReviewing: isReviewing, reviewError: reviewError,
-                    onOpenFile: onOpenFile, onDiff: { change in self.panel = nil; selectedDiff = change },
-                    onKeep: onKeep, onRequestRestore: { changes in
-                        self.panel = nil
-                        confirmation = changes
-                    })
-            }
-        }
         .sheet(item: $selectedDiff) { change in
             AgentFileDiffView(change: change, onOpenFile: onOpenFile)
         }
@@ -92,6 +71,37 @@ struct AgentActivitySummaryBar: View {
         }
         .padding(.horizontal, 18)
         .padding(.bottom, 4)
+    }
+
+    private var tabs: some View {
+        HStack(spacing: 0) {
+            ForEach(Panel.allCases, id: \.self) { item in
+                if item != .tasks { Divider().frame(height: 14).overlay(AgentPanelStyle.border) }
+                Button { panel = panel == item ? nil : item } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: item.icon).font(LitheTheme.uiFont(size: 11))
+                        Text(item.title)
+                        badge(item)
+                    }
+                    .foregroundStyle(panel == item ? AgentPanelStyle.text : AgentPanelStyle.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 24)
+                    .background(panel == item ? AgentPanelStyle.context : Color.clear, in: RoundedRectangle(cornerRadius: 4))
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.litheNoPress)
+                .litheRowHover()
+                .accessibilityIdentifier("agent-activity-\(item.rawValue)")
+                .accessibilityValue(count(item))
+                .accessibilityAddTraits(panel == item ? .isSelected : [])
+                .help(item.title)
+            }
+        }
+        .font(LitheTheme.uiFont(size: 11))
+        .padding(.horizontal, 6)
+        .padding(.vertical, 4)
+        .frame(height: 32)
+        .background(AgentPanelStyle.canvas, in: RoundedRectangle(cornerRadius: 6))
+        .overlay(RoundedRectangle(cornerRadius: 6).stroke(AgentPanelStyle.border, lineWidth: 1))
     }
 
     private func count(_ panel: Panel) -> String {
@@ -117,6 +127,7 @@ struct AgentActivityDetailsView: View {
     let panel: AgentActivitySummaryBar.Panel
     let activity: AgentActivity
     let plan: AgentPlan?
+    let width: CGFloat
     let isResponding: Bool
     let isReviewing: Bool
     let reviewError: String?
@@ -126,52 +137,56 @@ struct AgentActivityDetailsView: View {
     let onRequestRestore: ([AgentFileChange]) -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            Text(panel.title).font(LitheTheme.uiFont(size: 12, weight: .semibold))
+        VStack(alignment: .leading, spacing: 0) {
             switch panel {
             case .tasks:
-                if let plan { AgentPlanView(plan: plan, isResponding: isResponding, expanded: true) }
-                else { tools(activity.tools, empty: "No tasks have been reported yet.") }
-            case .running: tools(activity.running, empty: "No tools are running.")
+                if let plan, !plan.entries.isEmpty {
+                    AgentPlanView(plan: plan, isResponding: isResponding, embedded: true)
+                } else { tools(activity.tools, empty: "No tasks yet") }
+            case .running: tools(activity.running, empty: "No tools running")
             case .edits: edits
             }
             if let reviewError {
                 Text(reviewError).font(LitheTheme.uiFont(size: 11)).foregroundStyle(LitheTheme.error).textSelection(.enabled)
+                    .padding(8)
             }
         }
-        .padding(12)
-        .frame(width: 340)
+        .frame(width: width)
         .foregroundStyle(AgentPanelStyle.text)
+        .accessibilityIdentifier("agent-activity-content-\(panel.rawValue)")
     }
 
     @ViewBuilder private func tools(_ tools: [AgentConversationMessage], empty: LocalizedStringKey) -> some View {
         if tools.isEmpty { emptyState(empty) }
-        else { AgentToolGroupView(messages: tools, searchText: "", onOpenFile: onOpenFile, initiallyExpanded: true) }
+        else { AgentToolGroupView(messages: tools, searchText: "", onOpenFile: onOpenFile, embedded: true) }
     }
 
     private var edits: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if activity.files.isEmpty { emptyState("No file edits to review.") }
+        VStack(alignment: .leading, spacing: 0) {
+            if activity.files.isEmpty { emptyState("No file edits") }
             else {
-                HStack {
+                HStack(spacing: 8) {
+                    Spacer(minLength: 0)
                     Button("Roll back all", role: .destructive) { onRequestRestore(activity.files) }
                         .disabled(isResponding || isReviewing || !activity.files.allSatisfy(\.canRevert))
                         .accessibilityIdentifier("agent-edits-revert-all")
-                    Spacer()
                     Button("Keep all") { onKeep(activity.files) }
                         .disabled(isResponding || isReviewing || activity.files.contains(where: \.isPending))
                         .help("The Agent already saved these files. Mark the current changes as reviewed.")
                         .accessibilityIdentifier("agent-edits-keep-all")
                 }
                 .font(LitheTheme.uiFont(size: 11))
+                .padding(8)
+                .background(AgentPanelStyle.context)
                 ScrollView {
                     LazyVStack(spacing: 2) {
                         ForEach(activity.files) { change in fileRow(change) }
                     }
+                    .padding(4)
                 }
                 .litheScrollViewChrome()
-                .frame(height: min(220, CGFloat(activity.files.count) * 34))
-                if isReviewing { ProgressView().controlSize(.small) }
+                .frame(height: min(220, CGFloat(activity.files.count) * 34 + 6))
+                if isReviewing { ProgressView().controlSize(.small).padding(8) }
             }
         }
     }
@@ -208,11 +223,12 @@ struct AgentActivityDetailsView: View {
         .font(LitheTheme.uiFont(size: 11))
         .padding(.horizontal, 4)
         .frame(height: 32)
-        .background(AgentPanelStyle.context, in: RoundedRectangle(cornerRadius: 4))
+        .litheRowHover()
     }
 
     private func emptyState(_ text: LocalizedStringKey) -> some View {
         Text(text).font(LitheTheme.uiFont(size: 11.5)).foregroundStyle(AgentPanelStyle.secondary)
-            .frame(maxWidth: .infinity, minHeight: 44, alignment: .center)
+            .frame(maxWidth: .infinity, alignment: .center)
+            .padding(16)
     }
 }
